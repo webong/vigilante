@@ -80,7 +80,9 @@ func run(args []string, out io.Writer) error {
 	repoSSHKey := fs.String("repo-ssh-key", "", "Path to an SSH private key for private ssh:// or git@ clones of -repo (default: VIGILANTE_GIT_SSH_KEY env var / ssh-agent)")
 	graphFile := fs.String("graph-file", "", "Optional path to persist the ext + vigilante graph JSON store")
 	queueSize := fs.Int("queue-size", 256, "Bounded packet mirror ring-buffer capacity")
-	supervisedAgent := fs.Bool("supervised-agent", false, "Launch agent out-of-process via ext/res/system/supervisor + jsonline IPC")
+	supervisedAgent := fs.Bool("supervised-agent", false, "Launch agent out-of-process via ext/res/system/supervisor + jsonline IPC (equivalent to -agent supervised)")
+	agentKind := fs.String("agent", "", "Agent kind: builtin (default rule engine), cli:<command> (shell out to an external LLM/agent binary), or supervised (out-of-process via ext supervisor)")
+	agentTimeout := fs.Duration("agent-timeout", 30*time.Second, "Per-triage timeout for -agent cli")
 	agentIPC := fs.String("agent-ipc", "", "Internal IPC address when running in -mode agent-worker")
 	configPath := fs.String("config", "", "Path to a config file (JSON or flat YAML) supplying defaults for any unset flag")
 
@@ -98,6 +100,9 @@ func run(args []string, out io.Writer) error {
 	fs.Visit(func(f *flag.Flag) { set[f.Name] = true })
 	if !set["mode"] && cfg.Mode != "" {
 		*mode = cfg.Mode
+	}
+	if !set["agent"] && cfg.Agent != "" {
+		*agentKind = cfg.Agent
 	}
 	if !set["gateway"] && cfg.Gateway != "" {
 		*gatewayPosture = cfg.Gateway
@@ -309,14 +314,35 @@ func run(args []string, out io.Writer) error {
 	}
 
 	var gw *agent.Gateway
-	if *supervisedAgent {
+	// Resolve the agent kind: explicit -agent wins; -supervised-agent maps to
+	// "supervised"; empty means builtin.
+	kind, cliCmd := splitAgentArg(*agentKind)
+	if kind == "" && *supervisedAgent {
+		kind = "supervised"
+	}
+	switch kind {
+	case "supervised":
 		fmt.Fprintln(out, "[vigilante] starting out-of-process supervised agent via github.com/webong/ext/res/system/supervisor...")
 		gw, _, err = agent.NewSupervisedGateway(ctx, agent.SupervisedOptions{
 			Store:           store,
 			Repo:            repoIdx,
 			RequireChecksum: true,
 		})
-	} else {
+	case "cli":
+		fmt.Fprintf(out, "[vigilante] CLI agent: %s (timeout %s)\n", orDash(cliCmd), *agentTimeout)
+		if cliCmd == "" {
+			return fmt.Errorf("-agent cli:<command> requires a command")
+		}
+		cliHandler := agent.NewCLIHandler(agent.CLIOptions{
+			Command: cliCmd,
+			Args:    []string{},
+			Timeout: *agentTimeout,
+			OnError: func(err error) {
+				fmt.Fprintln(out, "[vigilante] cli agent error (falling back to builtin):", err)
+			},
+		})
+		gw, err = agent.NewInProcessGateway(ctx, store, repoIdx, cliHandler)
+	default: // "builtin"
 		gw, err = agent.NewInProcessGateway(ctx, store, repoIdx, nil)
 	}
 	if err != nil {
@@ -566,6 +592,15 @@ func obsQueueProbe() obs.QueueCounters {
 // obsQueueStats adapts the probe func to obs.NewService's signature.
 func obsQueueStats(probe func() obs.QueueCounters) func() obs.QueueCounters {
 	return probe
+}
+
+// splitAgentArg parses an -agent value of the form "kind" or "cli:<command>",
+// returning the kind and any attached command.
+func splitAgentArg(raw string) (kind, command string) {
+	kind, command, _ = strings.Cut(raw, ":")
+	kind = strings.ToLower(strings.TrimSpace(kind))
+	command = strings.TrimSpace(command)
+	return kind, command
 }
 
 // splitGatewayArg parses a -gateway value of the form "posture" or

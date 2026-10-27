@@ -15,3 +15,18 @@ func TestSplitGatewayArg(t *testing.T) {
 		}
 	}
 }
+
+func TestSplitAgentArg(t *testing.T) {
+	cases := []struct{ in, kind, cmd string }{
+		{"", "", ""},
+		{"builtin", "builtin", ""},
+		{"supervised", "supervised", ""},
+		{"cli:claude -p", "cli", "claude -p"},
+	}
+	for _, c := range cases {
+		kind, cmd := splitAgentArg(c.in)
+		if kind != c.kind || cmd != c.cmd {
+			t.Errorf("splitAgentArg(%q) = %q/%q, want %q/%q", c.in, kind, cmd, c.kind, c.cmd)
+		}
+	}
+}
