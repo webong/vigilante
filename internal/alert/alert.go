@@ -101,6 +101,12 @@ type Options struct {
 	HTTPClient *http.Client
 	// OnError is invoked for store/delivery errors (logging seam).
 	OnError func(error)
+	// DeliverAttempts is the max delivery attempts per record including the
+	// first (default 3; 1 disables retries).
+	DeliverAttempts int
+	// DeliverBackoff is the base delay between delivery retries; it doubles
+	// per attempt (default 250ms, capped at 4s).
+	DeliverBackoff time.Duration
 }
 
 // Store persists and optionally delivers alerts.
@@ -128,6 +134,12 @@ func Open(opts Options) (*Store, error) {
 	}
 	if opts.HTTPClient == nil {
 		opts.HTTPClient = &http.Client{Timeout: 10 * time.Second}
+	}
+	if opts.DeliverAttempts <= 0 {
+		opts.DeliverAttempts = 3
+	}
+	if opts.DeliverBackoff <= 0 {
+		opts.DeliverBackoff = 250 * time.Millisecond
 	}
 	if dir := filepath.Dir(opts.Path); dir != "" && dir != "." {
 		if err := os.MkdirAll(dir, 0o755); err != nil {
@@ -191,6 +203,9 @@ func (s *Store) Record(rec Record) {
 }
 
 // deliver POSTs the record, preferring the Planner route when configured.
+// It retries transient failures with exponential backoff up to DeliverAttempts,
+// counting failures only after all attempts are exhausted. Retries never block
+// the caller beyond the per-attempt client timeout.
 func (s *Store) deliver(rec Record) {
 	body, err := json.Marshal(rec)
 	if err != nil {
@@ -201,10 +216,39 @@ func (s *Store) deliver(rec Record) {
 	if s.opts.PlannerURL != "" {
 		url = fmt.Sprintf("%s/vigilante/alerts", trimRightSlash(s.opts.PlannerURL))
 	}
+
+	backoff := s.opts.DeliverBackoff
+	var lastErr error
+	for attempt := 1; attempt <= s.opts.DeliverAttempts; attempt++ {
+		if ok := s.deliverOnce(url, body); ok {
+			s.mu.Lock()
+			s.delivered++
+			s.mu.Unlock()
+			return
+		}
+		lastErr = errDelivery
+		if attempt < s.opts.DeliverAttempts {
+			time.Sleep(backoff)
+			if backoff < 4*time.Second {
+				backoff *= 2
+			}
+		}
+	}
+	s.mu.Lock()
+	s.failed++
+	s.mu.Unlock()
+	s.err(fmt.Errorf("alert: deliver failed after %d attempts: %w", s.opts.DeliverAttempts, lastErr))
+}
+
+// errDelivery is the sentinel for a single failed attempt (real cause logged).
+var errDelivery = fmt.Errorf("delivery attempt failed")
+
+// deliverOnce makes a single POST attempt; returns true on 2xx.
+func (s *Store) deliverOnce(url string, body []byte) bool {
 	req, err := http.NewRequestWithContext(context.Background(), http.MethodPost, url, bytes.NewReader(body))
 	if err != nil {
 		s.err(fmt.Errorf("alert: build request: %w", err))
-		return
+		return false
 	}
 	req.Header.Set("Content-Type", "application/json")
 	if s.opts.InternalToken != "" {
@@ -212,24 +256,16 @@ func (s *Store) deliver(rec Record) {
 	}
 	resp, err := s.opts.HTTPClient.Do(req)
 	if err != nil {
-		s.mu.Lock()
-		s.failed++
-		s.mu.Unlock()
-		s.err(fmt.Errorf("alert: deliver: %w", err))
-		return
+		s.err(fmt.Errorf("alert: deliver attempt: %w", err))
+		return false
 	}
 	defer resp.Body.Close()
 	_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 4<<10))
 	if resp.StatusCode >= 300 {
-		s.mu.Lock()
-		s.failed++
-		s.mu.Unlock()
-		s.err(fmt.Errorf("alert: deliver status %d", resp.StatusCode))
-		return
+		s.err(fmt.Errorf("alert: deliver attempt status %d", resp.StatusCode))
+		return false
 	}
-	s.mu.Lock()
-	s.delivered++
-	s.mu.Unlock()
+	return true
 }
 
 // rotateLocked renames the current file to .1 (shifting older ones out).

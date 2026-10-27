@@ -162,6 +162,69 @@ func TestDeliveryFailureCountedNotFatal(t *testing.T) {
 	}
 }
 
+func TestDeliveryRetriesThenSucceeds(t *testing.T) {
+	var attempts int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if atomic.AddInt32(&attempts, 1) < 3 {
+			w.WriteHeader(http.StatusServiceUnavailable)
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	s, err := Open(Options{
+		Path:            filepath.Join(t.TempDir(), "a.jsonl"),
+		DeliverURL:      srv.URL,
+		DeliverAttempts: 3,
+		DeliverBackoff:  time.Millisecond,
+		OnError:         func(error) {},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+
+	s.Record(Record{FlowID: "retry", Severity: SeverityHigh})
+	if n := atomic.LoadInt32(&attempts); n != 3 {
+		t.Fatalf("attempts = %d, want 3 (2 failures + success)", n)
+	}
+	_, delivered, failed := s.Stats()
+	if delivered != 1 || failed != 0 {
+		t.Fatalf("delivered=%d failed=%d", delivered, failed)
+	}
+}
+
+func TestDeliveryExhaustsAttempts(t *testing.T) {
+	var attempts int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(&attempts, 1)
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	defer srv.Close()
+
+	s, err := Open(Options{
+		Path:            filepath.Join(t.TempDir(), "a.jsonl"),
+		DeliverURL:      srv.URL,
+		DeliverAttempts: 2,
+		DeliverBackoff:  time.Millisecond,
+		OnError:         func(error) {},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+
+	s.Record(Record{FlowID: "fail", Severity: SeverityHigh})
+	if n := atomic.LoadInt32(&attempts); n != 2 {
+		t.Fatalf("attempts = %d, want 2", n)
+	}
+	_, _, failed := s.Stats()
+	if failed != 1 {
+		t.Fatalf("failed = %d, want 1", failed)
+	}
+}
+
 func TestSeverityRankOrdering(t *testing.T) {
 	if !(rank(SeverityCritical) > rank(SeverityHigh) &&
 		rank(SeverityHigh) > rank(SeverityMedium) &&
