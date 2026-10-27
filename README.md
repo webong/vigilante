@@ -9,6 +9,7 @@ As packets and requests enter a system, Vigilante non-blockingly copies them int
 | Layer | Package | Responsibility |
 | --- | --- | --- |
 | **Hot-Path Network Tap** | `internal/tap` | Non-blocking HTTP reverse-proxy / middleware and TCP stream tee (`MirrorQueue`). Drops mirrored copies on backpressure so primary upstream traffic never stalls. Redacts sensitive auth/cookie headers before agent dispatch. Exposes `tap.NewMirror` / `tap.PreviewRequest` for in-process embedding and external ingress adapters. |
+| **Policy & Block Enforcement** | `internal/policy` + `internal/block` | Declarative allow/deny/block rules (path globs, hosts, methods, CIDRs) evaluated before forwarding; `block` verdicts enforced via a pluggable backend — dry-run `log`, `iptables`, or `nft` — with loopback/unspecified guards and idempotent chain provisioning. |
 | **webong/gateway Spinner Adapter** | `internal/gateway` | Runs Vigilante as the relay observation point for a [webong/gateway](https://github.com/webong/gateway) Spinner-style ingress: public listener with optional TLS, upstream forwarding, optional Planner route decisions (fail-open), and Spinner-parity `/health`, `/ready`, `/metrics` endpoints. Mirrors Spinner's config surface without importing its separate Go module. |
 | **OS, Process & Socket Discovery** | `github.com/webong/ext/res/system` | Inventories host shells, filesystems, and running processes (`ScanHost`, `ScanProcesses`, `InspectProcess`) to map ports/sockets to PIDs, executable paths, open sockets, and memory-mapped shared libraries. |
 | **Network Topology** | `github.com/webong/ext/res/system/network` | Zero-traffic observation of local interfaces, assigned IP addresses, route tables, and DNS resolver settings (`network.Discover`). |
@@ -107,7 +108,47 @@ queue.Drain(ctx, 2, func(ctx context.Context, ev agent.PacketEvent) { /* triage 
 http.ListenAndServe(":8080", tap.NewMirror(appHandler, queue, ":8080", "app:3000"))
 ```
 
-### 7. Run Tests
+### 7. Enforce Policy (allow / deny / block)
+Vigilante owns request admission: a declarative policy file gates every request
+before it is forwarded, and `block` verdicts are enforced through a pluggable
+backend (dry-run `log` by default, or real `iptables` / `nft`).
+
+```yaml
+# vigilante-policy.yaml
+deny_cidrs:
+  - 192.0.2.0/24          # always denied, evaluated before rules
+rules:
+  - name: block-admin
+    action: deny           # 403, not mirrored
+    paths: [/admin/*]
+  - name: block-git
+    action: block          # mirrored for agent triage, then 403 + source block
+    path_prefixes: ["/.git/"]
+  - name: allow-health
+    action: allow          # short-circuits remaining rules
+    paths: [/healthz]
+```
+
+```sh
+# Dry-run (log only — default):
+go run ./cmd/vigilante -mode http -listen :8080 -target http://127.0.0.1:3000 \
+  -policy vigilante-policy.yaml -block-mode log
+
+# Enforce blocks via a dedicated iptables chain (requires root/CAP_NET_ADMIN):
+go run ./cmd/vigilante -mode http -listen :8080 -target http://127.0.0.1:3000 \
+  -policy vigilante-policy.yaml -block-mode iptables -block-chain VIGILANTE
+
+# nftables:
+go run ./cmd/vigilante ... -block-mode nft -block-chain VIGILANTE
+```
+
+Rules match on `methods`, `hosts`, `paths` (glob: `*` segment, `**` across
+segments), `path_prefixes`, and `cidrs`. The first match wins; unmatched
+requests are allowed (deny is opt-in). Agent verdicts with
+`action: recommend-block` are also fed to the enforcer. Loopback and
+unspecified addresses are never blocked.
+
+### 8. Run Tests
 ```sh
 go test -race -v ./...
 ```

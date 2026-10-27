@@ -26,8 +26,10 @@ import (
 	"github.com/webong/ext/res/system/graph"
 	"github.com/webong/ext/res/system/supervisor"
 	"github.com/webong/vigilante/internal/agent"
+	"github.com/webong/vigilante/internal/block"
 	"github.com/webong/vigilante/internal/correlator"
 	"github.com/webong/vigilante/internal/gateway"
+	"github.com/webong/vigilante/internal/policy"
 	"github.com/webong/vigilante/internal/repo"
 	"github.com/webong/vigilante/internal/schema"
 	"github.com/webong/vigilante/internal/tap"
@@ -51,6 +53,9 @@ func run(args []string, out io.Writer) error {
 	tlsKey := fs.String("tls-key", "", "TLS private key file for HTTPS on -listen (http/spinner modes)")
 	plannerURL := fs.String("planner-url", "", "Optional webong/gateway Planner URL for route decisions (spinner mode)")
 	plannerToken := fs.String("planner-token", "", "Internal token for the Planner (spinner mode)")
+	policyFile := fs.String("policy", "", "Path to a policy file (YAML/JSON) with allow/deny/block rules")
+	blockMode := fs.String("block-mode", "log", "Block enforcement mode: log (dry-run), iptables, or nft")
+	blockChain := fs.String("block-chain", "VIGILANTE", "iptables/nft chain name for block enforcement")
 	repoTarget := fs.String("repo", ".", "Git repo target to index for codebase awareness: any host URL (https/ssh/git/file://, scp-like git@host:path), owner/repo or host/owner/repo shorthand, or a local path")
 	repoRef := fs.String("repo-ref", "", "Branch or tag to shallow-clone for -repo (empty = remote default branch)")
 	repoUser := fs.String("repo-user", "", "HTTPS username for private -repo clones (default: x-access-token, or VIGILANTE_GIT_USER)")
@@ -120,6 +125,32 @@ func run(args []string, out io.Writer) error {
 			snap.FileCount, len(snap.Routes), len(snap.Sinks), snap.Commit, shortHash(snap.TreeDigest))
 	}
 
+	var polGate tap.PolicyGate
+	var enforcer *block.Enforcer
+	if *policyFile != "" {
+		engine, err := policy.Load(*policyFile)
+		if err != nil {
+			return err
+		}
+		fmt.Fprintf(out, "[vigilante] policy loaded from %s\n", *policyFile)
+		polGate = func(r *http.Request) string {
+			return string(engine.Evaluate(r).Action)
+		}
+	}
+	{
+		var err error
+		enforcer, err = block.New(block.Options{
+			Mode:  block.Mode(*blockMode),
+			Chain: *blockChain,
+			OnBlock: func(ip net.IP, rule string) {
+				fmt.Fprintf(out, "[vigilante] BLOCK enforced (%s) ip=%s rule=%s\n", *blockMode, ip, rule)
+			},
+		})
+		if err != nil {
+			return err
+		}
+	}
+
 	var gw *agent.Gateway
 	if *supervisedAgent {
 		fmt.Fprintln(out, "[vigilante] starting out-of-process supervised agent via github.com/webong/ext/res/system/supervisor...")
@@ -143,6 +174,16 @@ func run(args []string, out io.Writer) error {
 		FallbackPID: os.Getpid(),
 		OnVerdict: func(env agent.EnrichedEnvelope, v agent.Verdict) {
 			printVerdict(out, env, v)
+			// Enforce agent-recommended blocks through the pluggable enforcer.
+			if v.Action == "recommend-block" && enforcer != nil {
+				if ip := net.ParseIP(env.Event.SrcAddr); ip != nil {
+					// SrcAddr may be "ip:port"; strip the port.
+					if host, _, err := net.SplitHostPort(env.Event.SrcAddr); err == nil {
+						ip = net.ParseIP(host)
+					}
+					_ = enforcer.Block(ctx, ip, "agent-verdict")
+				}
+			}
 		},
 	})
 	if err != nil {
@@ -158,13 +199,13 @@ func run(args []string, out io.Writer) error {
 	case "demo":
 		return runDemo(ctx, out, corr, store, *supervisedAgent)
 	case "http":
-		return runHTTPProxy(ctx, out, corr, *listenAddr, *targetAddr, *queueSize, *tlsCert, *tlsKey)
+		return runHTTPProxy(ctx, out, corr, *listenAddr, *targetAddr, *queueSize, *tlsCert, *tlsKey, polGate)
 	case "tcp":
 		return runTCPProxy(ctx, out, corr, *listenAddr, *targetAddr, *queueSize)
 	case "middleware":
-		return runMiddlewareMode(ctx, out, corr, *listenAddr, *targetAddr, *queueSize, *tlsCert, *tlsKey)
+		return runMiddlewareMode(ctx, out, corr, *listenAddr, *targetAddr, *queueSize, *tlsCert, *tlsKey, polGate)
 	case "spinner":
-		return runSpinnerMode(ctx, out, corr, *listenAddr, *targetAddr, *plannerURL, *plannerToken, *tlsCert, *tlsKey, *queueSize)
+		return runSpinnerMode(ctx, out, corr, *listenAddr, *targetAddr, *plannerURL, *plannerToken, *tlsCert, *tlsKey, *queueSize, polGate)
 	default:
 		return fmt.Errorf("unsupported mode %q (choose demo, http, tcp, middleware, spinner, or agent-worker)", *mode)
 	}
@@ -174,7 +215,7 @@ func run(args []string, out io.Writer) error {
 // handler seam (tap.NewMirror): it observes every request and forwards to the
 // upstream target, terminating TLS when configured. This is the mode to use
 // when Vigilante runs inside the same process as the application.
-func runMiddlewareMode(ctx context.Context, out io.Writer, corr *correlator.Correlator, listenAddr, targetRaw string, queueSize int, tlsCert, tlsKey string) error {
+func runMiddlewareMode(ctx context.Context, out io.Writer, corr *correlator.Correlator, listenAddr, targetRaw string, queueSize int, tlsCert, tlsKey string, gate tap.PolicyGate) error {
 	if !strings.Contains(targetRaw, "://") {
 		targetRaw = "http://" + targetRaw
 	}
@@ -188,7 +229,7 @@ func runMiddlewareMode(ctx context.Context, out io.Writer, corr *correlator.Corr
 		_, _ = corr.ProcessPacket(ctx, ev)
 	})
 
-	handler := tap.NewMirror(httputil.NewSingleHostReverseProxy(targetURL), queue, listenAddr, targetURL.Host)
+	handler := tap.HTTPMiddlewareGate(httputil.NewSingleHostReverseProxy(targetURL), queue, listenAddr, targetURL.Host, gate)
 	srv := &http.Server{Addr: listenAddr, Handler: handler}
 
 	go func() {
@@ -215,7 +256,7 @@ func runMiddlewareMode(ctx context.Context, out io.Writer, corr *correlator.Corr
 // runSpinnerMode runs Vigilante as the relay observation point for a
 // webong/gateway Spinner-style ingress: Spinner owns the public listener and
 // forwarding; Vigilante mirrors every proxied request and triages it.
-func runSpinnerMode(ctx context.Context, out io.Writer, corr *correlator.Correlator, listenAddr, targetRaw, plannerURL, plannerToken, tlsCert, tlsKey string, queueSize int) error {
+func runSpinnerMode(ctx context.Context, out io.Writer, corr *correlator.Correlator, listenAddr, targetRaw, plannerURL, plannerToken, tlsCert, tlsKey string, queueSize int, gate tap.PolicyGate) error {
 	srv, err := gateway.NewServer(gateway.Options{
 		ListenAddr:    listenAddr,
 		TargetURL:     targetRaw,
@@ -356,7 +397,7 @@ func runDemo(ctx context.Context, out io.Writer, corr *correlator.Correlator, st
 	return nil
 }
 
-func runHTTPProxy(ctx context.Context, out io.Writer, corr *correlator.Correlator, listenAddr, targetRaw string, queueSize int, tlsCert, tlsKey string) error {
+func runHTTPProxy(ctx context.Context, out io.Writer, corr *correlator.Correlator, listenAddr, targetRaw string, queueSize int, tlsCert, tlsKey string, gate tap.PolicyGate) error {
 	if !strings.Contains(targetRaw, "://") {
 		targetRaw = "http://" + targetRaw
 	}
@@ -372,7 +413,7 @@ func runHTTPProxy(ctx context.Context, out io.Writer, corr *correlator.Correlato
 
 	srv := &http.Server{
 		Addr:    listenAddr,
-		Handler: tap.NewHTTPReverseProxyTap(targetURL, queue, listenAddr),
+		Handler: tap.HTTPMiddlewareGate(tap.NewHTTPReverseProxyTap(targetURL, queue, listenAddr), queue, listenAddr, targetURL.Host, gate),
 	}
 
 	go func() {
