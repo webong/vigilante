@@ -41,12 +41,22 @@ func NewMirror(next http.Handler, queue *MirrorQueue, listenAddr, targetAddr str
 	return HTTPMiddleware(next, queue, listenAddr, targetAddr)
 }
 
+// NewMirrorGate is NewMirror with policy enforcement (deny -> 403, block ->
+// mirror + 403).
+func NewMirrorGate(next http.Handler, queue *MirrorQueue, listenAddr, targetAddr string, gate PolicyGate) http.Handler {
+	return HTTPMiddlewareGate(next, queue, listenAddr, targetAddr, gate)
+}
+
 // NewMirrorQueueAdapter returns a Mirror that feeds the given queue.
 func NewMirrorQueueAdapter(queue *MirrorQueue) Mirror {
 	return mirrorQueue{q: queue}
 }
 
 const DefaultMaxPreviewBytes = 1024
+
+// PolicyGate evaluates a request and returns "allow", "deny", or "block".
+// It is satisfied by a closure over *policy.Engine (see cmd/vigilante).
+type PolicyGate func(*http.Request) string
 
 var sensitiveHeaders = map[string]bool{
 	"authorization":       true,
@@ -121,9 +131,30 @@ func (q *MirrorQueue) Drain(ctx context.Context, workers int, fn func(context.Co
 }
 
 // HTTPMiddleware wraps an http.Handler, cloning request metadata and a bounded
-// body preview into the MirrorQueue while forwarding the untouched request to next.
+// body preview into the MirrorQueue while forwarding the untouched request to
+// next. When a PolicyGate is provided, deny verdicts return 403 before
+// forwarding and block verdicts still mirror (so the correlator sees them).
 func HTTPMiddleware(next http.Handler, queue *MirrorQueue, listenAddr, targetAddr string) http.Handler {
+	return HTTPMiddlewareGate(next, queue, listenAddr, targetAddr, nil)
+}
+
+// HTTPMiddlewareGate is HTTPMiddleware with policy enforcement.
+func HTTPMiddlewareGate(next http.Handler, queue *MirrorQueue, listenAddr, targetAddr string, gate PolicyGate) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if gate != nil {
+			switch gate(r) {
+			case "deny":
+				http.Error(w, "forbidden by policy", http.StatusForbidden)
+				return
+			case "block":
+				// Mirror first (agent triage sees the offending request), then
+				// reject; the block itself is enforced by the caller via the
+				// correlator's verdict path.
+				PreviewRequest(queue, r, listenAddr, targetAddr)
+				http.Error(w, "blocked by policy", http.StatusForbidden)
+				return
+			}
+		}
 		PreviewRequest(queue, r, listenAddr, targetAddr)
 		next.ServeHTTP(w, r)
 	})
