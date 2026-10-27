@@ -18,6 +18,7 @@ import (
 	"net"
 	"os/exec"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -54,6 +55,112 @@ type Enforcer struct {
 	opts Options
 	// ready tracks whether the chain/table has been provisioned.
 	provisioned bool
+}
+
+// ThresholdConfig configures dynamic rate-based blocking: after N qualifying
+// verdicts from one source within Window, the source is automatically blocked.
+// A zero Count disables dynamic blocking.
+type ThresholdConfig struct {
+	// Count is how many qualifying verdicts trigger a block (e.g. 5).
+	Count int
+	// Window is the sliding window over which Count is evaluated (e.g. 1m).
+	Window time.Duration
+	// MinSeverity is the lowest severity that counts toward the threshold
+	// (e.g. "high"); empty counts all.
+	MinSeverity string
+}
+
+// verdictRank orders severities for threshold comparison.
+func verdictRank(sev string) int {
+	switch strings.ToLower(sev) {
+	case "critical":
+		return 4
+	case "high":
+		return 3
+	case "medium":
+		return 2
+	case "low":
+		return 1
+	default:
+		return 0
+	}
+}
+
+// Threshold watches per-source verdict rates and fires Block when a source
+// crosses the configured count within the window. It is safe for concurrent
+// use. Threshold never blocks loopback/unspecified addresses (Enforcer guards
+// re-enforce this).
+type Threshold struct {
+	cfg     ThresholdConfig
+	enc     *Enforcer
+	mu      sync.Mutex
+	hits    map[string][]time.Time // source IP -> recent qualifying timestamps
+	minRank int
+}
+
+// NewThreshold builds a Threshold backed by the given Enforcer. Returns nil
+// (a no-op) when cfg.Count <= 0.
+func NewThreshold(cfg ThresholdConfig, enc *Enforcer) *Threshold {
+	if cfg.Count <= 0 || enc == nil {
+		return nil
+	}
+	if cfg.Window <= 0 {
+		cfg.Window = time.Minute
+	}
+	return &Threshold{
+		cfg:     cfg,
+		enc:     enc,
+		hits:    map[string][]time.Time{},
+		minRank: verdictRank(cfg.MinSeverity),
+	}
+}
+
+// Observe records a verdict for source and, when the threshold is crossed,
+// enforces a block on that source. It returns true if this call triggered a
+// new block. Observations are idempotent per source within the window: once a
+// source is blocked it is not re-blocked until it ages out.
+func (t *Threshold) Observe(ctx context.Context, source string, severity string) bool {
+	if t == nil {
+		return false
+	}
+	if verdictRank(severity) < t.minRank {
+		return false
+	}
+	ip := net.ParseIP(hostPart(source))
+	if ip == nil || ip.IsLoopback() || ip.IsUnspecified() {
+		// Never threshold-block local/unspecified addresses.
+		return false
+	}
+
+	key := ip.String()
+	now := time.Now()
+	t.mu.Lock()
+	cutoff := now.Add(-t.cfg.Window)
+	recent := t.hits[key][:0]
+	for _, ts := range t.hits[key] {
+		if ts.After(cutoff) {
+			recent = append(recent, ts)
+		}
+	}
+	recent = append(recent, now)
+	t.hits[key] = recent
+	count := len(recent)
+	t.mu.Unlock()
+
+	// Fire exactly when the count crosses the threshold (not on every later hit).
+	if count == t.cfg.Count {
+		_ = t.enc.Block(ctx, ip, "threshold:"+severity)
+		return true
+	}
+	return false
+}
+
+// hostPart strips a port from an address, leaving the IP host.
+func hostPart(addr string) string {
+	if h, _, err := net.SplitHostPort(addr); err == nil {
+		return h
+	}
+	return addr
 }
 
 // New creates an Enforcer for the given mode.

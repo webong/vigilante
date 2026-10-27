@@ -105,6 +105,76 @@ func TestIPTablesIdempotentSkipsExistingRule(t *testing.T) {
 	}
 }
 
+func TestThresholdFiresOnceAtCount(t *testing.T) {
+	var fires int
+	enc, err := New(Options{
+		Mode:    ModeLog,
+		OnBlock: func(net.IP, string) { fires++ },
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	th := NewThreshold(ThresholdConfig{Count: 3, Window: time.Minute, MinSeverity: "high"}, enc)
+	if th == nil {
+		t.Fatal("threshold should not be nil")
+	}
+	ctx := context.Background()
+	src := "203.0.113.10:5555"
+
+	// Two high verdicts: no block yet.
+	if th.Observe(ctx, src, "high") {
+		t.Fatal("fired before threshold")
+	}
+	if th.Observe(ctx, src, "critical") {
+		t.Fatal("fired before threshold")
+	}
+	// Third qualifying verdict crosses.
+	if !th.Observe(ctx, src, "high") {
+		t.Fatal("expected block on 3rd")
+	}
+	// Fourth does not re-fire.
+	if th.Observe(ctx, src, "high") {
+		t.Fatal("should not re-fire after crossing")
+	}
+	if fires != 1 {
+		t.Fatalf("fires = %d, want 1", fires)
+	}
+}
+
+func TestThresholdRespectsMinSeverity(t *testing.T) {
+	enc, _ := New(Options{Mode: ModeLog})
+	th := NewThreshold(ThresholdConfig{Count: 2, Window: time.Minute, MinSeverity: "high"}, enc)
+	ctx := context.Background()
+	src := "203.0.113.11:1"
+	// info verdicts don't count.
+	th.Observe(ctx, src, "info")
+	th.Observe(ctx, src, "info")
+	th.Observe(ctx, src, "info")
+	// now a high — still only 1 qualifying.
+	if th.Observe(ctx, src, "high") {
+		t.Fatal("low-severity hits should not count toward a high threshold")
+	}
+}
+
+func TestThresholdSkipsLoopback(t *testing.T) {
+	enc, _ := New(Options{Mode: ModeLog})
+	th := NewThreshold(ThresholdConfig{Count: 1, Window: time.Minute}, enc)
+	ctx := context.Background()
+	if th.Observe(ctx, "127.0.0.1:8080", "critical") {
+		t.Fatal("loopback must never be threshold-blocked")
+	}
+}
+
+func TestNewThresholdDisabledWhenCountZero(t *testing.T) {
+	enc, _ := New(Options{Mode: ModeLog})
+	if NewThreshold(ThresholdConfig{Count: 0}, enc) != nil {
+		t.Fatal("count 0 should yield nil (disabled)")
+	}
+	if NewThreshold(ThresholdConfig{Count: 3}, nil) != nil {
+		t.Fatal("nil enforcer should yield nil")
+	}
+}
+
 func TestUnknownModeRejected(t *testing.T) {
 	if _, err := New(Options{Mode: "waffle"}); err == nil {
 		t.Fatal("expected error for unknown mode")
