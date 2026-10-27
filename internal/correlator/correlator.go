@@ -1,5 +1,6 @@
 // Package correlator bridges mirrored network packets with the live OS, process,
-// network topology, and application dependency graph powered by webong/ext.
+// network topology, application dependency graph, and target codebase/repository
+// powered by webong/ext.
 package correlator
 
 import (
@@ -20,6 +21,7 @@ import (
 	"github.com/webong/ext/res/system/network"
 	"github.com/webong/vigilante/internal/agent"
 	"github.com/webong/vigilante/internal/deps"
+	"github.com/webong/vigilante/internal/repo"
 	"github.com/webong/vigilante/internal/schema"
 )
 
@@ -35,6 +37,7 @@ type ProcessEntry struct {
 type Options struct {
 	SystemGraph *system.Graph
 	Gateway     *agent.Gateway
+	Repo        *repo.Index
 	CacheTTL    time.Duration
 	// FallbackPID is used when inspecting a local process in environments where
 	// the target port belongs to the current or child process.
@@ -50,6 +53,7 @@ type Correlator struct {
 	sysGraph    *system.Graph
 	store       graph.Store
 	gateway     *agent.Gateway
+	repoIdx     *repo.Index
 	cacheTTL    time.Duration
 	fallbackPID int
 	workingDir  string
@@ -80,12 +84,17 @@ func New(opts Options) (*Correlator, error) {
 	}
 	wd := opts.WorkingDir
 	if wd == "" {
-		wd, _ = os.Getwd()
+		if opts.Repo != nil && opts.Repo.Snapshot().LocalRoot != "" {
+			wd = opts.Repo.Snapshot().LocalRoot
+		} else {
+			wd, _ = os.Getwd()
+		}
 	}
 	return &Correlator{
 		sysGraph:    opts.SystemGraph,
 		store:       opts.SystemGraph.Store,
 		gateway:     opts.Gateway,
+		repoIdx:     opts.Repo,
 		cacheTTL:    ttl,
 		fallbackPID: opts.FallbackPID,
 		workingDir:  wd,
@@ -100,7 +109,6 @@ func New(opts Options) (*Correlator, error) {
 func (c *Correlator) RefreshBaseline(ctx context.Context) error {
 	hostInv, err := c.sysGraph.ScanHost(ctx)
 	if err != nil {
-		// Even if a subset fails, DiscoverHost is still attempted.
 		hostInv, _ = system.DiscoverHost(ctx)
 	}
 
@@ -138,8 +146,8 @@ func (c *Correlator) RefreshBaseline(ctx context.Context) error {
 }
 
 // ProcessPacket correlates a mirrored PacketEvent with the owning server process,
-// OS state, and application dependency graph, projects the flow into graph.Store,
-// and invokes the agent gateway when appropriate.
+// OS state, application dependency graph, and indexed repository routes/sinks,
+// projects the flow into graph.Store, and invokes the agent gateway.
 func (c *Correlator) ProcessPacket(ctx context.Context, ev agent.PacketEvent) (agent.Verdict, error) {
 	if ev.FlowID == "" {
 		ev.FlowID = hashID(ev.Protocol + "|" + ev.SrcAddr + "|" + ev.DstAddr + "|" + ev.TargetAddr)
@@ -153,7 +161,7 @@ func (c *Correlator) ProcessPacket(ctx context.Context, ev agent.PacketEvent) (a
 		targetAddr = ev.DstAddr
 	}
 
-	procEntry, isNewSocket := c.resolveTargetProcess(ctx, targetAddr)
+	procEntry, isNewSocket := c.ResolveSocketOwner(ctx, targetAddr)
 
 	c.mu.Lock()
 	c.seenFlows[ev.FlowID]++
@@ -170,7 +178,9 @@ func (c *Correlator) ProcessPacket(ctx context.Context, ev agent.PacketEvent) (a
 		triggerReason = "anomalous-payload-signature"
 	}
 
-	commit, err := c.projectFlowToGraph(ctx, ev, procEntry, netSnap)
+	codebaseCtx := c.buildCodebaseContext(ev)
+
+	commit, err := c.projectFlowToGraph(ctx, ev, procEntry, netSnap, codebaseCtx)
 	var revision uint64
 	if err == nil {
 		revision = commit.Revision
@@ -183,6 +193,7 @@ func (c *Correlator) ProcessPacket(ctx context.Context, ev agent.PacketEvent) (a
 		ServerProcess:   procEntry.Process,
 		NetworkTopology: netSnap,
 		DependencyGraph: procEntry.Deps,
+		Codebase:        codebaseCtx,
 		GraphRevision:   revision,
 	}
 
@@ -201,82 +212,43 @@ func (c *Correlator) ProcessPacket(ctx context.Context, ev agent.PacketEvent) (a
 	return verdict, nil
 }
 
-func (c *Correlator) resolveTargetProcess(ctx context.Context, targetAddr string) (ProcessEntry, bool) {
-	port := extractPort(targetAddr)
-	cacheKey := port
-	if cacheKey == "" {
-		cacheKey = targetAddr
+func (c *Correlator) buildCodebaseContext(ev agent.PacketEvent) *agent.CodebaseContext {
+	if c.repoIdx == nil {
+		return nil
 	}
-
-	c.mu.RLock()
-	cached, ok := c.portCache[cacheKey]
-	c.mu.RUnlock()
-	if ok && time.Since(cached.UpdatedAt) < c.cacheTTL {
-		return cached, false
+	snap := c.repoIdx.Snapshot()
+	ctx := &agent.CodebaseContext{
+		Source:     snap.Source,
+		Commit:     snap.Commit,
+		TreeDigest: snap.TreeDigest,
+		FileCount:  snap.FileCount,
+		Languages:  snap.Languages,
 	}
-
-	pid := c.fallbackPID
-	if pid <= 0 {
-		pid = os.Getpid()
+	if matched, ok := c.repoIdx.MatchRoute(ev.Method, ev.Path); ok {
+		ctx.MatchedRoute = &matched
 	}
-
-	var procCtx agent.ServerProcessContext
-	procCtx.PID = pid
-
-	// Use github.com/webong/ext/res/system.InspectProcess to gather live OS evidence
-	// for the target process (executable, start_id, sockets, and mapped libraries).
-	snap, err := system.InspectProcess(ctx, pid, system.ProcessOptions{
-		MaxResources: 512,
-		Timeout:      3 * time.Second,
-	})
-	if err == nil && len(snap.Processes) == 1 {
-		_ = c.sysGraph.ObserveProcesses(ctx, snap)
-		p := snap.Processes[0]
-		procCtx.PID = p.PID
-		procCtx.ParentPID = p.ParentPID
-		procCtx.Name = p.Name
-		procCtx.Executable = p.Executable
-		procCtx.StartID = p.StartID
-		procCtx.Owner = p.Owner
-		for _, r := range p.Resources {
-			switch r.Kind {
-			case "socket":
-				sockDesc := r.Protocol + " " + r.LocalAddress
-				if r.RemoteAddress != "" {
-					sockDesc += "->" + r.RemoteAddress
-				}
-				if r.State != "" {
-					sockDesc += " (" + r.State + ")"
-				}
-				procCtx.OpenSockets = append(procCtx.OpenSockets, strings.TrimSpace(sockDesc))
-			case "mapping":
-				if r.Path != "" {
-					procCtx.MappedLibs = append(procCtx.MappedLibs, r.Path)
-				}
-			}
+	// Attach up to 8 relevant sinks (prioritizing the matched route's file if present).
+	for _, s := range snap.Sinks {
+		if ctx.MatchedRoute != nil && s.File == ctx.MatchedRoute.File {
+			ctx.RelevantSinks = append(ctx.RelevantSinks, s)
 		}
-	} else {
-		exe, _ := os.Executable()
-		procCtx.Name = "vigilante-target"
-		procCtx.Executable = exe
-		procCtx.StartID = strconv.Itoa(pid)
+		if len(ctx.RelevantSinks) >= 8 {
+			break
+		}
 	}
-
-	depGraph := deps.Inspect(procCtx.Executable, c.workingDir, procCtx.MappedLibs)
-	entry := ProcessEntry{
-		Process:   procCtx,
-		Deps:      depGraph,
-		UpdatedAt: time.Now().UTC(),
+	for _, s := range snap.Sinks {
+		if len(ctx.RelevantSinks) >= 8 {
+			break
+		}
+		if ctx.MatchedRoute != nil && s.File == ctx.MatchedRoute.File {
+			continue
+		}
+		ctx.RelevantSinks = append(ctx.RelevantSinks, s)
 	}
-
-	c.mu.Lock()
-	c.portCache[cacheKey] = entry
-	c.mu.Unlock()
-
-	return entry, true
+	return ctx
 }
 
-func (c *Correlator) projectFlowToGraph(ctx context.Context, ev agent.PacketEvent, procEntry ProcessEntry, netSnap network.Snapshot) (graph.Commit, error) {
+func (c *Correlator) projectFlowToGraph(ctx context.Context, ev agent.PacketEvent, procEntry ProcessEntry, netSnap network.Snapshot, cb *agent.CodebaseContext) (graph.Commit, error) {
 	now := time.Now().UTC()
 	prov := graph.Provenance{Source: "vigilante", Operation: "flow-mirrored", At: now}
 
@@ -357,6 +329,60 @@ func (c *Correlator) projectFlowToGraph(ctx context.Context, ev agent.PacketEven
 		},
 	}
 
+	if cb != nil {
+		codebaseID := "codebase/" + hashID(cb.Source+"|"+cb.TreeDigest)
+		vertices = append(vertices, graph.Vertex{
+			ID:   codebaseID,
+			Kind: schema.KindCodebase,
+			Attributes: map[string]any{
+				"source":      cb.Source,
+				"commit":      cb.Commit,
+				"tree_digest": cb.TreeDigest,
+				"file_count":  cb.FileCount,
+			},
+			Provenance: prov,
+		})
+		edges = append(edges, graph.Edge{
+			ID:         "built-from/" + hashID(procID+"->"+codebaseID),
+			From:       procID,
+			To:         codebaseID,
+			Type:       schema.RelBuiltFrom,
+			Provenance: prov,
+		})
+
+		if cb.MatchedRoute != nil {
+			mr := cb.MatchedRoute
+			routeID := "route/" + hashID(codebaseID+"|"+mr.Method+"|"+mr.Pattern+"|"+mr.File)
+			vertices = append(vertices, graph.Vertex{
+				ID:   routeID,
+				Kind: schema.KindRouteHandler,
+				Attributes: map[string]any{
+					"method":  mr.Method,
+					"pattern": mr.Pattern,
+					"file":    mr.File,
+					"line":    mr.Line,
+				},
+				Provenance: prov,
+			})
+			edges = append(edges,
+				graph.Edge{
+					ID:         "exposes-route/" + hashID(codebaseID+"->"+routeID),
+					From:       codebaseID,
+					To:         routeID,
+					Type:       schema.RelExposesRoute,
+					Provenance: prov,
+				},
+				graph.Edge{
+					ID:         "matches-route/" + hashID(flowID+"->"+routeID),
+					From:       flowID,
+					To:         routeID,
+					Type:       schema.RelMatchesRoute,
+					Provenance: prov,
+				},
+			)
+		}
+	}
+
 	// Project up to 32 dependencies into the graph so queries stay bounded and fast.
 	maxDeps := len(procEntry.Deps.Dependencies)
 	if maxDeps > 32 {
@@ -405,9 +431,10 @@ func (c *Correlator) projectAlertToGraph(ctx context.Context, ev agent.PacketEve
 				ID:   alertID,
 				Kind: schema.KindAgentAlert,
 				Attributes: map[string]any{
-					"severity": v.Severity,
-					"action":   v.Action,
-					"summary":  v.Summary,
+					"severity":        v.Severity,
+					"action":          v.Action,
+					"summary":         v.Summary,
+					"matched_handler": v.MatchedHandler,
 				},
 				Provenance: prov,
 			},

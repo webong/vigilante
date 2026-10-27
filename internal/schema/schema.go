@@ -18,12 +18,17 @@ const (
 	KindDependency  = Namespace + "/dependency"
 	KindNetTopology = Namespace + "/network-topology"
 	KindAgentAlert  = Namespace + "/agent-alert"
+	KindCodebase    = Namespace + "/codebase"
+	KindRouteHandler = Namespace + "/route-handler"
 
 	RelAcceptsFlow   = Namespace + "/accepts-flow"
 	RelOwnedBy       = Namespace + "/owned-by"
 	RelDependsOn     = Namespace + "/depends-on"
 	RelRoutesThrough = Namespace + "/routes-through"
 	RelTriggered     = Namespace + "/triggered"
+	RelBuiltFrom     = Namespace + "/built-from"
+	RelExposesRoute  = Namespace + "/exposes-route"
+	RelMatchesRoute  = Namespace + "/matches-route"
 )
 
 // Register registers the vigilante.net schema and relationship validator on store.
@@ -39,12 +44,14 @@ func Register(store graph.Store) error {
 // vigilante.net namespace.
 func Validate(view graph.View, tx graph.Transaction) error {
 	allowedKinds := map[string]bool{
-		KindListener:    true,
-		KindFlow:        true,
-		KindProcessRef:  true,
-		KindDependency:  true,
-		KindNetTopology: true,
-		KindAgentAlert:  true,
+		KindListener:     true,
+		KindFlow:         true,
+		KindProcessRef:   true,
+		KindDependency:   true,
+		KindNetTopology:  true,
+		KindAgentAlert:   true,
+		KindCodebase:     true,
+		KindRouteHandler: true,
 	}
 	for _, v := range tx.Vertices {
 		if !allowedKinds[v.Kind] {
@@ -58,6 +65,9 @@ func Validate(view graph.View, tx graph.Transaction) error {
 		RelDependsOn:     {KindProcessRef, KindDependency},
 		RelRoutesThrough: {KindFlow, KindNetTopology},
 		RelTriggered:     {KindFlow, KindAgentAlert},
+		RelBuiltFrom:     {KindProcessRef, KindCodebase},
+		RelExposesRoute:  {KindCodebase, KindRouteHandler},
+		RelMatchesRoute:  {KindFlow, KindRouteHandler},
 	}
 
 	for _, e := range tx.Edges {
