@@ -20,12 +20,14 @@ import (
 	"os/signal"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"syscall"
 	"time"
 
 	"github.com/webong/ext/res/system"
 	"github.com/webong/ext/res/system/graph"
 	"github.com/webong/ext/res/system/supervisor"
+	"github.com/webong/vigilante/ext/obs"
 	"github.com/webong/vigilante/internal/agent"
 	"github.com/webong/vigilante/internal/alert"
 	"github.com/webong/vigilante/internal/block"
@@ -58,6 +60,7 @@ func run(args []string, out io.Writer) error {
 	plannerToken := fs.String("planner-token", "", "Internal token for the upstream route planner (gateway mode)")
 	gatewayPosture := fs.String("gateway", "local", "Gateway posture: local (Vigilante's own ingress, default) or external:<url> (attach to an ingress running elsewhere — recommended if you already run one)")
 	policyFile := fs.String("policy", "", "Path to a policy file (YAML/JSON) with allow/deny/block rules")
+	obsEnabled := fs.Bool("obs", true, "Enable the obs ext plugin (dashboard at /obs/dashboard + JSON API), when an alert store is present")
 	blockMode := fs.String("block-mode", "log", "Block enforcement mode: log (dry-run), iptables, or nft")
 	blockChain := fs.String("block-chain", "VIGILANTE", "iptables/nft chain name for block enforcement")
 	alertFile := fs.String("alert-file", "", "Path to the JSONL alert store (enables persistence; rotated by size)")
@@ -262,6 +265,35 @@ func run(args []string, out io.Writer) error {
 		fmt.Fprintf(out, "[vigilante] alert store active: %s (deliver: %s)\n", path, orDash(*alertDeliver))
 	}
 
+	// Open the obs ext plugin (dashboard + query API) whenever an alert store
+	// exists. It reads alerts via the store's Reader; metrics flow into /metrics.
+	var obsBridge *obs.Bridge
+	var obsClose func(context.Context) error
+	var obsMetrics func(http.ResponseWriter)
+	if alertStore != nil && *obsEnabled {
+		obsSvc := obs.NewService(
+			alertStore,
+			obsQueueStats(obsQueueProbe),
+			alertStore.Stats,
+		)
+		_, bridge, closeFn, oerr := obs.Open(ctx, obsSvc)
+		if oerr != nil {
+			return fmt.Errorf("open obs plugin: %w", oerr)
+		}
+		obsBridge, obsClose = bridge, closeFn
+		defer func() {
+			if obsClose != nil {
+				_ = obsClose(context.Background())
+			}
+		}()
+		obsMetrics = func(w http.ResponseWriter) {
+			for sev, n := range alertStore.CountBySeverity() {
+				fmt.Fprintf(w, "vigilante_alerts_by_severity{severity=%q} %d\n", string(sev), n)
+			}
+		}
+		fmt.Fprintln(out, "[vigilante] obs plugin active: /obs/dashboard, /obs/alerts, /obs/summary (ext.plugin/v1 vigilante.obs@v1)")
+	}
+
 	var gw *agent.Gateway
 	if *supervisedAgent {
 		fmt.Fprintln(out, "[vigilante] starting out-of-process supervised agent via github.com/webong/ext/res/system/supervisor...")
@@ -327,18 +359,18 @@ func run(args []string, out io.Writer) error {
 	case "demo":
 		return runDemo(ctx, out, corr, store, *supervisedAgent, *sampleRate)
 	case "http":
-		return runHTTPProxy(ctx, out, corr, *listenAddr, *targetAddr, *queueSize, *tlsCert, *tlsKey, polGate, alertStore, *sampleRate)
+		return runHTTPProxy(ctx, out, corr, *listenAddr, *targetAddr, *queueSize, *tlsCert, *tlsKey, polGate, alertStore, *sampleRate, obsBridge, obsMetrics)
 	case "tcp":
 		return runTCPProxy(ctx, out, corr, *listenAddr, *targetAddr, *queueSize)
 	case "middleware":
-		return runMiddlewareMode(ctx, out, corr, *listenAddr, *targetAddr, *queueSize, *tlsCert, *tlsKey, polGate, alertStore, *sampleRate)
+		return runMiddlewareMode(ctx, out, corr, *listenAddr, *targetAddr, *queueSize, *tlsCert, *tlsKey, polGate, alertStore, *sampleRate, obsBridge, obsMetrics)
 	case "gateway":
 		gwPosture, gwExternal := splitGatewayArg(*gatewayPosture)
 		if gwExternal != "" && *targetAddr == "" {
 			// External forwards to the existing gateway, so target is optional.
 			*targetAddr = gwExternal
 		}
-		return runGatewayMode(ctx, out, corr, *listenAddr, *targetAddr, *plannerURL, *plannerToken, *tlsCert, *tlsKey, *queueSize, polGate, alertStore, *sampleRate, gwPosture, gwExternal)
+		return runGatewayMode(ctx, out, corr, *listenAddr, *targetAddr, *plannerURL, *plannerToken, *tlsCert, *tlsKey, *queueSize, polGate, alertStore, *sampleRate, gwPosture, gwExternal, obsBridge, obsMetrics)
 	default:
 		return fmt.Errorf("unsupported mode %q (choose demo, http, tcp, middleware, gateway, or agent-worker)", *mode)
 	}
@@ -348,7 +380,7 @@ func run(args []string, out io.Writer) error {
 // handler seam (tap.NewMirror): it observes every request and forwards to the
 // upstream target, terminating TLS when configured. This is the mode to use
 // when Vigilante runs inside the same process as the application.
-func runMiddlewareMode(ctx context.Context, out io.Writer, corr *correlator.Correlator, listenAddr, targetRaw string, queueSize int, tlsCert, tlsKey string, gate tap.PolicyGate, alertStore *alert.Store, sampleRate float64) error {
+func runMiddlewareMode(ctx context.Context, out io.Writer, corr *correlator.Correlator, listenAddr, targetRaw string, queueSize int, tlsCert, tlsKey string, gate tap.PolicyGate, alertStore *alert.Store, sampleRate float64, obsB *obs.Bridge, obsM func(http.ResponseWriter)) error {
 	if !strings.Contains(targetRaw, "://") {
 		targetRaw = "http://" + targetRaw
 	}
@@ -359,13 +391,14 @@ func runMiddlewareMode(ctx context.Context, out io.Writer, corr *correlator.Corr
 
 	queue := tap.NewMirrorQueue(queueSize)
 	queue.SetSampleRate(sampleRate)
+	registerQueue(queue)
 	queue.Drain(ctx, 2, func(ctx context.Context, ev agent.PacketEvent) {
 		_, _ = corr.ProcessPacket(ctx, ev)
 	})
 
 	handler := withStatus(
 		tap.HTTPMiddlewareGate(httputil.NewSingleHostReverseProxy(targetURL), queue, listenAddr, targetURL.Host, gate),
-		queue, alertStatsOf(alertStore))
+		queue, alertStatsOf(alertStore), obsB, obsM)
 	srv := &http.Server{Addr: listenAddr, Handler: handler}
 
 	go func() {
@@ -393,7 +426,7 @@ func runMiddlewareMode(ctx context.Context, out io.Writer, corr *correlator.Corr
 // the public listener and forwarding (optionally consulting an upstream route
 // planner); in "external:<url>" posture it attaches to an existing
 // ingress/gateway process at that endpoint, mirroring the traffic it carries.
-func runGatewayMode(ctx context.Context, out io.Writer, corr *correlator.Correlator, listenAddr, targetRaw, plannerURL, plannerToken, tlsCert, tlsKey string, queueSize int, gate tap.PolicyGate, alertStore *alert.Store, sampleRate float64, posture, externalURL string) error {
+func runGatewayMode(ctx context.Context, out io.Writer, corr *correlator.Correlator, listenAddr, targetRaw, plannerURL, plannerToken, tlsCert, tlsKey string, queueSize int, gate tap.PolicyGate, alertStore *alert.Store, sampleRate float64, posture, externalURL string, obsB *obs.Bridge, obsM func(http.ResponseWriter)) error {
 	srv, err := gateway.NewServer(gateway.Options{
 		Mode:          gateway.Mode(posture),
 		ListenAddr:    listenAddr,
@@ -411,12 +444,21 @@ func runGatewayMode(ctx context.Context, out io.Writer, corr *correlator.Correla
 		return err
 	}
 	srv.Queue().SetSampleRate(sampleRate)
+	registerQueue(srv.Queue())
 	if alertStore != nil {
 		srv.SetExtraMetrics(func(w http.ResponseWriter) {
 			stored, delivered, failed := alertStore.Stats()
 			fmt.Fprintf(w, "vigilante_alerts_stored_total %d\nvigilante_alerts_delivered_total %d\nvigilante_alerts_failed_total %d\n",
 				stored, delivered, failed)
+			if obsM != nil {
+				obsM(w)
+			}
 		})
+	} else if obsM != nil {
+		srv.SetExtraMetrics(func(w http.ResponseWriter) { obsM(w) })
+	}
+	if obsB != nil {
+		srv.SetHandlerMount("/obs", obsB)
 	}
 
 	go func() {
@@ -444,16 +486,35 @@ func runGatewayMode(ctx context.Context, out io.Writer, corr *correlator.Correla
 }
 
 // withStatus mounts the status endpoints (/healthz, /health, /ready, /metrics)
-// alongside the main handler: status paths go to status.Handler, everything
-// else to next (the tap/proxy).
-func withStatus(next http.Handler, queue *tap.MirrorQueue, alert status.AlertStats) http.Handler {
+// and, when present, the obs ext plugin bridge (/obs/*) alongside the main
+// handler: those paths are claimed, everything else goes to next (the tap).
+func withStatus(next http.Handler, queue *tap.MirrorQueue, alert status.AlertStats, obsB *obs.Bridge, obsM func(http.ResponseWriter)) http.Handler {
 	mux := http.NewServeMux()
 	mux.Handle("/healthz", status.Handler(queue, alert))
 	mux.Handle("/health", status.Handler(queue, alert))
 	mux.Handle("/ready", status.Handler(queue, alert))
-	mux.Handle("/metrics", status.Handler(queue, alert))
+	mux.Handle("/metrics", withObsMetrics(status.Handler(queue, alert), obsM))
+	if obsB != nil {
+		mux.Handle("/obs/", http.StripPrefix("/obs", obsB))
+		mux.Handle("/obs", http.StripPrefix("/obs", obsB))
+	}
 	mux.Handle("/", next)
 	return mux
+}
+
+// withObsMetrics appends the obs plugin's per-severity metrics to /metrics
+// output. It passes writes straight through and hooks WriteHeader so obs lines
+// are emitted after the inner handler completes.
+func withObsMetrics(inner http.Handler, obsM func(http.ResponseWriter)) http.Handler {
+	if obsM == nil {
+		return inner
+	}
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		inner.ServeHTTP(w, r)
+		if r.URL.Path == "/metrics" || strings.HasSuffix(r.URL.Path, "/metrics") {
+			obsM(w)
+		}
+	})
 }
 
 // alertStats adapts *alert.Store to the status package's counter signature.
@@ -462,6 +523,29 @@ func alertStatsOf(s *alert.Store) status.AlertStats {
 		return nil
 	}
 	return func() (uint64, uint64, uint64) { return s.Stats() }
+}
+
+// currentQueue holds the most recently created mirror queue so the obs plugin
+// can report queue counters in its summary. Set by each mode after it builds
+// its queue; nil until a mode runs.
+var currentQueue atomic.Pointer[tap.MirrorQueue]
+
+// registerQueue publishes a queue for the obs summary to read.
+func registerQueue(q *tap.MirrorQueue) { currentQueue.Store(q) }
+
+// obsQueueProbe is the function passed to obs.NewService; it reads currentQueue.
+func obsQueueProbe() obs.QueueCounters {
+	q := currentQueue.Load()
+	if q == nil {
+		return obs.QueueCounters{}
+	}
+	enqueued, dropped := q.Stats()
+	return obs.QueueCounters{Enqueued: enqueued, Dropped: dropped, SampledOut: q.SampledOut()}
+}
+
+// obsQueueStats adapts the probe func to obs.NewService's signature.
+func obsQueueStats(probe func() obs.QueueCounters) func() obs.QueueCounters {
+	return probe
 }
 
 // splitGatewayArg parses a -gateway value of the form "posture" or
@@ -583,7 +667,7 @@ func runDemo(ctx context.Context, out io.Writer, corr *correlator.Correlator, st
 	return nil
 }
 
-func runHTTPProxy(ctx context.Context, out io.Writer, corr *correlator.Correlator, listenAddr, targetRaw string, queueSize int, tlsCert, tlsKey string, gate tap.PolicyGate, alertStore *alert.Store, sampleRate float64) error {
+func runHTTPProxy(ctx context.Context, out io.Writer, corr *correlator.Correlator, listenAddr, targetRaw string, queueSize int, tlsCert, tlsKey string, gate tap.PolicyGate, alertStore *alert.Store, sampleRate float64, obsB *obs.Bridge, obsM func(http.ResponseWriter)) error {
 	if !strings.Contains(targetRaw, "://") {
 		targetRaw = "http://" + targetRaw
 	}
@@ -594,6 +678,7 @@ func runHTTPProxy(ctx context.Context, out io.Writer, corr *correlator.Correlato
 
 	queue := tap.NewMirrorQueue(queueSize)
 	queue.SetSampleRate(sampleRate)
+	registerQueue(queue)
 	queue.Drain(ctx, 2, func(ctx context.Context, ev agent.PacketEvent) {
 		_, _ = corr.ProcessPacket(ctx, ev)
 	})
@@ -602,7 +687,7 @@ func runHTTPProxy(ctx context.Context, out io.Writer, corr *correlator.Correlato
 		Addr: listenAddr,
 		Handler: withStatus(
 			tap.HTTPMiddlewareGate(tap.NewHTTPReverseProxyTap(targetURL, queue, listenAddr), queue, listenAddr, targetURL.Host, gate),
-			queue, alertStatsOf(alertStore)),
+			queue, alertStatsOf(alertStore), obsB, obsM),
 	}
 
 	go func() {
