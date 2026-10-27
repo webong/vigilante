@@ -57,6 +57,15 @@ type Server struct {
 	relay    http.Handler
 	httpSrv  *http.Server
 	observed atomic.Uint64
+	// extraMetrics, when set, appends additional metric lines to /metrics
+	// (e.g. alert store counters).
+	extraMetrics func(http.ResponseWriter)
+}
+
+// SetExtraMetrics registers a callback that writes additional metric lines to
+// the /metrics endpoint.
+func (s *Server) SetExtraMetrics(fn func(http.ResponseWriter)) {
+	s.extraMetrics = fn
 }
 
 // NewServer builds the ingress. observe is invoked for every mirrored request.
@@ -118,6 +127,9 @@ func (s *Server) handler() http.Handler {
 		queued, dropped := s.queue.Stats()
 		fmt.Fprintf(w, "vigilante_queue_enqueued_total %d\nvigilante_queue_dropped_total %d\nvigilante_requests_observed_total %d\n",
 			queued, dropped, s.observed.Load())
+		if s.extraMetrics != nil {
+			s.extraMetrics(w)
+		}
 	})
 	mux.Handle("/", s.relay)
 	return mux
