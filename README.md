@@ -10,6 +10,10 @@ As packets and requests enter a system, Vigilante non-blockingly copies them int
 | --- | --- | --- |
 | **Hot-Path Network Tap** | `internal/tap` | Non-blocking HTTP reverse-proxy / middleware and TCP stream tee (`MirrorQueue`). Drops mirrored copies on backpressure so primary upstream traffic never stalls. Redacts sensitive auth/cookie headers before agent dispatch. Exposes `tap.NewMirror` / `tap.PreviewRequest` for in-process embedding and external ingress adapters. |
 | **Redaction & Sampling** | `internal/redact` + `tap.MirrorQueue` | Scrubs JWTs, API keys, bearer/basic auth, secret key-values, and emails from paths/queries/body previews (deterministic, counted); lock-free `-sample-rate` dispatches only a fraction of flows to the agent under load. |
+| **Dynamic Block Thresholds** | `internal/block.Threshold` | Auto-blocks a source after N qualifying verdicts in a sliding window (`-block-threshold`/`-block-window`/`-block-min-severity`); never blocks loopback. |
+| **Delivery Retry** | `internal/alert` | Webhook delivery retries transient failures with exponential backoff (attempts + base backoff configurable). |
+| **obs ext plugin** | `ext/obs` | Dashboard + JSON query API as a genuine `ext.plugin/v1` plugin behind an `engine.Session`; reads alerts from the core store, contributes per-severity metrics. |
+| **Packaging** | `deploy/`, `Dockerfile`, `install.sh` | Hardened systemd unit, example config, multi-repo Docker build (context = parent of `vigilante/` + `ext/`), and one-command installer. |
 | **Status Endpoints** | `internal/status` | Shared `/healthz`, `/health`, `/ready`, and `/metrics` (queue + alert counters) mounted on every HTTP-serving mode. |
 | **Alert Store & Delivery** | `internal/alert` | Append-only JSONL verdict store with size-based rotation and severity filtering; pluggable delivery — direct webhook POST or via a webong/gateway Planner (`/vigilante/alerts`) so subscriber relays own fan-out/retries. Failures are counted, never block the hot path. |
 | **Policy & Block Enforcement** | `internal/policy` + `internal/block` | Declarative allow/deny/block rules (path globs, hosts, methods, CIDRs) evaluated before forwarding; `block` verdicts enforced via a pluggable backend — dry-run `log`, `iptables`, or `nft` — with loopback/unspecified guards and idempotent chain provisioning. |
@@ -161,6 +165,15 @@ requests are allowed (deny is opt-in). Agent verdicts with
 `action: recommend-block` are also fed to the enforcer. Loopback and
 unspecified addresses are never blocked.
 
+**Dynamic thresholds** auto-block a source after repeated bad verdicts (applies
+to HTTP and TCP sources):
+
+```sh
+# Block a source after 5 high+ verdicts within 1 minute:
+go run ./cmd/vigilante -mode http ... \
+  -block-threshold 5 -block-window 1m -block-min-severity high -block-mode log
+```
+
 ### 8. Persist & Deliver Alerts
 Vigilante owns alerting: every agent verdict is appended to a rotating JSONL
 store and (optionally) POSTed as JSON to a webhook — directly, or through a
@@ -187,8 +200,10 @@ go run ./cmd/vigilante -mode gateway -gateway local -listen :8080 -target http:/
 
 Flags: `-alert-file`, `-alert-deliver-url`, `-alert-min-severity`
 (`info|low|medium|high|critical`), `-alert-max-bytes` (rotation, default 10 MiB),
-`-alert-keep` (rotated files retained, default 3). When `-mode gateway` runs
-with a store, `/metrics` also exposes `vigilante_alerts_{stored,delivered,failed}_total`.
+`-alert-keep` (rotated files retained, default 3). Webhook delivery **retries**
+transient failures with exponential backoff (default 3 attempts, 250ms base).
+When `-mode gateway` runs with a store, `/metrics` also exposes
+`vigilante_alerts_{stored,delivered,failed}_total`.
 
 ### 9. Config File
 For systemd/containers, put defaults in a config file and override per-deployment
@@ -218,7 +233,41 @@ go run ./cmd/vigilante -config vigilante.json -listen :9443 -tls-cert cert.pem -
 Flat YAML (`key: value` lines) is also accepted; lists/objects belong in JSON.
 Unknown keys are rejected to catch typos early.
 
-### 10. Health & Metrics (all modes)
+### 11. Install (personal computer or server)
+
+**Binary + optional systemd service:**
+```sh
+./install.sh                 # build to /usr/local/bin/vigilante
+sudo ./install.sh systemd     # install config + systemd unit, enable + start
+```
+
+**Container** (build context is the parent of `vigilante/` + `ext/`, because
+`go.mod` uses `replace => ../ext`):
+```sh
+cd ..   # the directory containing both vigilante/ and ext/
+docker build -f vigilante/Dockerfile -t vigilante:latest .
+docker run -p 8080:8080 -v /var/log/vigilante:/var/log/vigilante vigilante:latest
+```
+
+Deploy assets: [`deploy/vigilante.service`](deploy/vigilante.service) (hardened
+systemd unit), [`deploy/vigilante.json.example`](deploy/vigilante.json.example),
+[`Dockerfile`](Dockerfile). For `-block-mode iptables|nft`, the unit needs
+`CAP_NET_ADMIN` (commented in the unit file).
+
+### 12. Dashboard & Plugin API (obs ext plugin)
+With an alert store present (default on via `-obs`), the **obs ext plugin**
+(`ext.plugin/v1 vigilante.obs@v1`) serves:
+
+- `GET /obs/dashboard` — HTML status page (severity counts + recent alerts)
+- `GET /obs/alerts?severity=&limit=` — JSON recent alerts
+- `GET /obs/summary` — JSON severity + queue + store counters
+- `/metrics` gains `vigilante_alerts_by_severity{severity=...}`
+
+It lives in [`ext/obs`](ext/obs) (plugins live under `ext/`, not `internal/`),
+runs behind a real `engine.Session`, and reads alerts from the core JSONL store
+without owning persistence.
+
+### 13. Health & Metrics (all modes)
 Every HTTP-serving mode (`http`, `middleware`, `gateway`) exposes:
 - `GET /healthz` (alias `/health`) → `ok`
 - `GET /ready` → `ready`
@@ -226,7 +275,7 @@ Every HTTP-serving mode (`http`, `middleware`, `gateway`) exposes:
   `vigilante_redact_hits_total`,
   `vigilante_alerts_{stored,delivered,failed}_total` (when an alert store is on)
 
-### 11. Redaction & Sampling (safe at volume)
+### 14. Redaction & Sampling (safe at volume)
 Mirrored traffic is scrubbed before it reaches the agent or the alert store:
 paths, query strings, and body previews have JWTs, `sk-`/`ghp_`/`AKIA`/Slack
 tokens, bearer/basic auth, `password`/`token`/`secret` key-values, and email
@@ -246,7 +295,7 @@ go run ./cmd/vigilante -mode http -listen :8080 -target http://127.0.0.1:3000 \
 `sample_rate` in the config file, and reports skipped flows via
 `vigilante_queue_sampled_out_total`.
 
-### 12. Run Tests
+### 15. Run Tests
 ```sh
 go test -race -v ./...
 ```

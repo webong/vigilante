@@ -64,6 +64,9 @@ func run(args []string, out io.Writer) error {
 	obsEnabled := fs.Bool("obs", true, "Enable the obs ext plugin (dashboard at /obs/dashboard + JSON API), when an alert store is present")
 	blockMode := fs.String("block-mode", "log", "Block enforcement mode: log (dry-run), iptables, or nft")
 	blockChain := fs.String("block-chain", "VIGILANTE", "iptables/nft chain name for block enforcement")
+	blockThreshold := fs.Int("block-threshold", 0, "Auto-block a source after N qualifying verdicts within -block-window (0 = disabled)")
+	blockWindow := fs.Duration("block-window", time.Minute, "Sliding window for -block-threshold")
+	blockMinSev := fs.String("block-min-severity", "high", "Lowest verdict severity counted toward -block-threshold")
 	alertFile := fs.String("alert-file", "", "Path to the JSONL alert store (enables persistence; rotated by size)")
 	alertMinSev := fs.String("alert-min-severity", "", "Minimum verdict severity to record/deliver: info, low, medium, high, critical")
 	alertDeliver := fs.String("alert-deliver-url", "", "Webhook URL to POST alerts to (direct when no planner is configured)")
@@ -216,6 +219,7 @@ func run(args []string, out io.Writer) error {
 
 	var polGate tap.PolicyGate
 	var enforcer *block.Enforcer
+	var threshold *block.Threshold
 	if *policyFile != "" {
 		engine, err := policy.Load(*policyFile)
 		if err != nil {
@@ -237,6 +241,15 @@ func run(args []string, out io.Writer) error {
 		})
 		if err != nil {
 			return err
+		}
+		threshold = block.NewThreshold(block.ThresholdConfig{
+			Count:       *blockThreshold,
+			Window:      *blockWindow,
+			MinSeverity: *blockMinSev,
+		}, enforcer)
+		if threshold != nil {
+			fmt.Fprintf(out, "[vigilante] dynamic block threshold: %d %s+ verdicts/%s per source\n",
+				*blockThreshold, *blockMinSev, *blockWindow)
 		}
 	}
 
@@ -343,6 +356,12 @@ func run(args []string, out io.Writer) error {
 						ip = net.ParseIP(host)
 					}
 					_ = enforcer.Block(ctx, ip, "agent-verdict")
+				}
+			}
+			// Feed the verdict into the dynamic threshold (auto-block after N).
+			if threshold != nil && v.Severity != "" && env.Event.SrcAddr != "" {
+				if threshold.Observe(ctx, env.Event.SrcAddr, v.Severity) {
+					fmt.Fprintf(out, "[vigilante] dynamic threshold crossed: source %s auto-blocked\n", env.Event.SrcAddr)
 				}
 			}
 		},
