@@ -18,6 +18,34 @@ import (
 	"github.com/webong/vigilante/internal/agent"
 )
 
+// Mirror is the minimal seam a host application needs to embed Vigilante in
+// its own HTTP stack: it observes (clones) each request into the mirror queue
+// while letting next handle the real traffic untouched.
+type Mirror interface {
+	Observe(*http.Request)
+}
+
+// mirrorQueue adapts *MirrorQueue to the Mirror interface.
+type mirrorQueue struct{ q *MirrorQueue }
+
+func (m mirrorQueue) Observe(r *http.Request) {
+	PreviewRequest(m.q, r, "", "")
+}
+
+// NewMirror wraps an existing http.Handler so every request is non-blockingly
+// cloned into queue before being served by next. Use this to embed Vigilante
+// in-process in any Go service:
+//
+//	http.Handle("/", tap.NewMirror(myHandler, queue, "app:8080", "app:8080"))
+func NewMirror(next http.Handler, queue *MirrorQueue, listenAddr, targetAddr string) http.Handler {
+	return HTTPMiddleware(next, queue, listenAddr, targetAddr)
+}
+
+// NewMirrorQueueAdapter returns a Mirror that feeds the given queue.
+func NewMirrorQueueAdapter(queue *MirrorQueue) Mirror {
+	return mirrorQueue{q: queue}
+}
+
 const DefaultMaxPreviewBytes = 1024
 
 var sensitiveHeaders = map[string]bool{
@@ -96,47 +124,54 @@ func (q *MirrorQueue) Drain(ctx context.Context, workers int, fn func(context.Co
 // body preview into the MirrorQueue while forwarding the untouched request to next.
 func HTTPMiddleware(next http.Handler, queue *MirrorQueue, listenAddr, targetAddr string) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		var preview string
-		var totalBytes int
-
-		if r.Body != nil {
-			buf, err := io.ReadAll(io.LimitReader(r.Body, DefaultMaxPreviewBytes))
-			if err == nil && len(buf) > 0 {
-				preview = string(buf)
-				totalBytes = len(buf)
-				r.Body = &teeReadCloser{
-					Reader: io.MultiReader(bytes.NewReader(buf), r.Body),
-					Closer: r.Body,
-				}
-			}
-		}
-
-		headers := make(map[string]string, len(r.Header))
-		for k, vals := range r.Header {
-			lower := strings.ToLower(k)
-			if sensitiveHeaders[lower] {
-				headers[k] = "[REDACTED]"
-				continue
-			}
-			headers[k] = strings.Join(vals, ", ")
-		}
-
-		ev := agent.PacketEvent{
-			Timestamp:      time.Now().UTC(),
-			Protocol:       "http",
-			SrcAddr:        r.RemoteAddr,
-			DstAddr:        listenAddr,
-			TargetAddr:     targetAddr,
-			Method:         r.Method,
-			Path:           r.URL.RequestURI(),
-			Headers:        headers,
-			PayloadPreview: preview,
-			PayloadBytes:   totalBytes,
-		}
-		queue.Enqueue(ev)
-
+		PreviewRequest(queue, r, listenAddr, targetAddr)
 		next.ServeHTTP(w, r)
 	})
+}
+
+// PreviewRequest clones request metadata and a bounded body preview into queue
+// and restores the body so the real handler is unaffected. It is the shared
+// observation primitive used by HTTPMiddleware and by external ingress
+// adapters (e.g. webong/gateway Spinner) that forward traffic themselves.
+func PreviewRequest(queue *MirrorQueue, r *http.Request, listenAddr, targetAddr string) {
+	var preview string
+	var totalBytes int
+
+	if r.Body != nil {
+		buf, err := io.ReadAll(io.LimitReader(r.Body, DefaultMaxPreviewBytes))
+		if err == nil && len(buf) > 0 {
+			preview = string(buf)
+			totalBytes = len(buf)
+			r.Body = &teeReadCloser{
+				Reader: io.MultiReader(bytes.NewReader(buf), r.Body),
+				Closer: r.Body,
+			}
+		}
+	}
+
+	headers := make(map[string]string, len(r.Header))
+	for k, vals := range r.Header {
+		lower := strings.ToLower(k)
+		if sensitiveHeaders[lower] {
+			headers[k] = "[REDACTED]"
+			continue
+		}
+		headers[k] = strings.Join(vals, ", ")
+	}
+
+	ev := agent.PacketEvent{
+		Timestamp:      time.Now().UTC(),
+		Protocol:       "http",
+		SrcAddr:        r.RemoteAddr,
+		DstAddr:        listenAddr,
+		TargetAddr:     targetAddr,
+		Method:         r.Method,
+		Path:           r.URL.RequestURI(),
+		Headers:        headers,
+		PayloadPreview: preview,
+		PayloadBytes:   totalBytes,
+	}
+	queue.Enqueue(ev)
 }
 
 // NewHTTPReverseProxyTap creates a reverse-proxy HTTP handler that forwards
