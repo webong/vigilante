@@ -14,6 +14,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"net/http/httputil"
 	"net/url"
 	"os"
 	"os/signal"
@@ -26,6 +27,7 @@ import (
 	"github.com/webong/ext/res/system/supervisor"
 	"github.com/webong/vigilante/internal/agent"
 	"github.com/webong/vigilante/internal/correlator"
+	"github.com/webong/vigilante/internal/gateway"
 	"github.com/webong/vigilante/internal/repo"
 	"github.com/webong/vigilante/internal/schema"
 	"github.com/webong/vigilante/internal/tap"
@@ -42,9 +44,13 @@ func run(args []string, out io.Writer) error {
 	fs := flag.NewFlagSet("vigilante", flag.ContinueOnError)
 	fs.SetOutput(out)
 
-	mode := fs.String("mode", "demo", "Execution mode: demo, http, tcp, or agent-worker")
+	mode := fs.String("mode", "demo", "Execution mode: demo, http, tcp, middleware, spinner, or agent-worker")
 	listenAddr := fs.String("listen", "127.0.0.1:8080", "Address for vigilante middleware to listen on")
-	targetAddr := fs.String("target", "http://127.0.0.1:9000", "Upstream server URL (for http) or host:port (for tcp)")
+	targetAddr := fs.String("target", "http://127.0.0.1:9000", "Upstream server URL (for http/spinner) or host:port (for tcp)")
+	tlsCert := fs.String("tls-cert", "", "TLS certificate file for HTTPS on -listen (http/spinner modes)")
+	tlsKey := fs.String("tls-key", "", "TLS private key file for HTTPS on -listen (http/spinner modes)")
+	plannerURL := fs.String("planner-url", "", "Optional webong/gateway Planner URL for route decisions (spinner mode)")
+	plannerToken := fs.String("planner-token", "", "Internal token for the Planner (spinner mode)")
 	repoTarget := fs.String("repo", ".", "Git repo target to index for codebase awareness: any host URL (https/ssh/git/file://, scp-like git@host:path), owner/repo or host/owner/repo shorthand, or a local path")
 	repoRef := fs.String("repo-ref", "", "Branch or tag to shallow-clone for -repo (empty = remote default branch)")
 	repoUser := fs.String("repo-user", "", "HTTPS username for private -repo clones (default: x-access-token, or VIGILANTE_GIT_USER)")
@@ -152,12 +158,103 @@ func run(args []string, out io.Writer) error {
 	case "demo":
 		return runDemo(ctx, out, corr, store, *supervisedAgent)
 	case "http":
-		return runHTTPProxy(ctx, out, corr, *listenAddr, *targetAddr, *queueSize)
+		return runHTTPProxy(ctx, out, corr, *listenAddr, *targetAddr, *queueSize, *tlsCert, *tlsKey)
 	case "tcp":
 		return runTCPProxy(ctx, out, corr, *listenAddr, *targetAddr, *queueSize)
+	case "middleware":
+		return runMiddlewareMode(ctx, out, corr, *listenAddr, *targetAddr, *queueSize, *tlsCert, *tlsKey)
+	case "spinner":
+		return runSpinnerMode(ctx, out, corr, *listenAddr, *targetAddr, *plannerURL, *plannerToken, *tlsCert, *tlsKey, *queueSize)
 	default:
-		return fmt.Errorf("unsupported mode %q (choose demo, http, tcp, or agent-worker)", *mode)
+		return fmt.Errorf("unsupported mode %q (choose demo, http, tcp, middleware, spinner, or agent-worker)", *mode)
 	}
+}
+
+// runMiddlewareMode embeds the Vigilante tap in-process behind an existing
+// handler seam (tap.NewMirror): it observes every request and forwards to the
+// upstream target, terminating TLS when configured. This is the mode to use
+// when Vigilante runs inside the same process as the application.
+func runMiddlewareMode(ctx context.Context, out io.Writer, corr *correlator.Correlator, listenAddr, targetRaw string, queueSize int, tlsCert, tlsKey string) error {
+	if !strings.Contains(targetRaw, "://") {
+		targetRaw = "http://" + targetRaw
+	}
+	targetURL, err := url.Parse(targetRaw)
+	if err != nil {
+		return fmt.Errorf("invalid target URL: %w", err)
+	}
+
+	queue := tap.NewMirrorQueue(queueSize)
+	queue.Drain(ctx, 2, func(ctx context.Context, ev agent.PacketEvent) {
+		_, _ = corr.ProcessPacket(ctx, ev)
+	})
+
+	handler := tap.NewMirror(httputil.NewSingleHostReverseProxy(targetURL), queue, listenAddr, targetURL.Host)
+	srv := &http.Server{Addr: listenAddr, Handler: handler}
+
+	go func() {
+		<-ctx.Done()
+		shutCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		_ = srv.Shutdown(shutCtx)
+	}()
+
+	scheme := "http"
+	if tlsCert != "" && tlsKey != "" {
+		scheme = "https"
+	}
+	fmt.Fprintf(out, "[vigilante] middleware tap active on %s://%s -> forwarding to %s\n", scheme, listenAddr, targetURL.String())
+	if scheme == "https" {
+		return srv.ListenAndServeTLS(tlsCert, tlsKey)
+	}
+	if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+		return err
+	}
+	return nil
+}
+
+// runSpinnerMode runs Vigilante as the relay observation point for a
+// webong/gateway Spinner-style ingress: Spinner owns the public listener and
+// forwarding; Vigilante mirrors every proxied request and triages it.
+func runSpinnerMode(ctx context.Context, out io.Writer, corr *correlator.Correlator, listenAddr, targetRaw, plannerURL, plannerToken, tlsCert, tlsKey string, queueSize int) error {
+	srv, err := gateway.NewServer(gateway.Options{
+		ListenAddr:    listenAddr,
+		TargetURL:     targetRaw,
+		PlannerURL:    plannerURL,
+		InternalToken: plannerToken,
+		TLSCertFile:   tlsCert,
+		TLSKeyFile:    tlsKey,
+		QueueSize:     queueSize,
+	}, func(ctx context.Context, ev agent.PacketEvent) {
+		_, _ = corr.ProcessPacket(ctx, ev)
+	})
+	if err != nil {
+		return err
+	}
+
+	go func() {
+		<-ctx.Done()
+		shutCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		_ = srv.Shutdown(shutCtx)
+	}()
+
+	scheme := "http"
+	if tlsCert != "" && tlsKey != "" {
+		scheme = "https"
+	}
+	fmt.Fprintf(out, "[vigilante] spinner ingress active on %s://%s -> forwarding to %s (planner: %s)\n",
+		scheme, listenAddr, targetRaw, orDash(plannerURL))
+	if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+		return err
+	}
+	return nil
+}
+
+func orDash(s string) string {
+	if s == "" {
+		return "none"
+	}
+	return s
 }
 
 func runDemo(ctx context.Context, out io.Writer, corr *correlator.Correlator, store graph.Store, supervised bool) error {
@@ -259,7 +356,7 @@ func runDemo(ctx context.Context, out io.Writer, corr *correlator.Correlator, st
 	return nil
 }
 
-func runHTTPProxy(ctx context.Context, out io.Writer, corr *correlator.Correlator, listenAddr, targetRaw string, queueSize int) error {
+func runHTTPProxy(ctx context.Context, out io.Writer, corr *correlator.Correlator, listenAddr, targetRaw string, queueSize int, tlsCert, tlsKey string) error {
 	if !strings.Contains(targetRaw, "://") {
 		targetRaw = "http://" + targetRaw
 	}
@@ -285,7 +382,14 @@ func runHTTPProxy(ctx context.Context, out io.Writer, corr *correlator.Correlato
 		_ = srv.Shutdown(shutCtx)
 	}()
 
-	fmt.Fprintf(out, "[vigilante] HTTP tap listening on %s -> forwarding to %s\n", listenAddr, targetURL.String())
+	scheme := "http"
+	if tlsCert != "" && tlsKey != "" {
+		scheme = "https"
+	}
+	fmt.Fprintf(out, "[vigilante] %s tap listening on %s -> forwarding to %s\n", scheme, listenAddr, targetURL.String())
+	if scheme == "https" {
+		return srv.ListenAndServeTLS(tlsCert, tlsKey)
+	}
 	if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 		return err
 	}

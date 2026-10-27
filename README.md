@@ -8,7 +8,8 @@ As packets and requests enter a system, Vigilante non-blockingly copies them int
 
 | Layer | Package | Responsibility |
 | --- | --- | --- |
-| **Hot-Path Network Tap** | `internal/tap` | Non-blocking HTTP reverse-proxy / middleware and TCP stream tee (`MirrorQueue`). Drops mirrored copies on backpressure so primary upstream traffic never stalls. Redacts sensitive auth/cookie headers before agent dispatch. |
+| **Hot-Path Network Tap** | `internal/tap` | Non-blocking HTTP reverse-proxy / middleware and TCP stream tee (`MirrorQueue`). Drops mirrored copies on backpressure so primary upstream traffic never stalls. Redacts sensitive auth/cookie headers before agent dispatch. Exposes `tap.NewMirror` / `tap.PreviewRequest` for in-process embedding and external ingress adapters. |
+| **webong/gateway Spinner Adapter** | `internal/gateway` | Runs Vigilante as the relay observation point for a [webong/gateway](https://github.com/webong/gateway) Spinner-style ingress: public listener with optional TLS, upstream forwarding, optional Planner route decisions (fail-open), and Spinner-parity `/health`, `/ready`, `/metrics` endpoints. Mirrors Spinner's config surface without importing its separate Go module. |
 | **OS, Process & Socket Discovery** | `github.com/webong/ext/res/system` | Inventories host shells, filesystems, and running processes (`ScanHost`, `ScanProcesses`, `InspectProcess`) to map ports/sockets to PIDs, executable paths, open sockets, and memory-mapped shared libraries. |
 | **Network Topology** | `github.com/webong/ext/res/system/network` | Zero-traffic observation of local interfaces, assigned IP addresses, route tables, and DNS resolver settings (`network.Discover`). |
 | **Application Dependency Graph** | `internal/deps` | Extracts module dependency graphs from compiled Go binaries (`debug/buildinfo`), `go.mod`, `go.sum`, `package.json`, `package-lock.json`, `Cargo.lock`, `uv.lock`, `requirements.txt`, and `res/system` shared library mappings, plus CVE advisory matching. |
@@ -59,7 +60,54 @@ go run ./cmd/vigilante \
   -target 127.0.0.1:5432
 ```
 
-### 4. Run Tests
+### 4. Terminate TLS on the Tap (http / spinner modes)
+```sh
+go run ./cmd/vigilante \
+  -mode http \
+  -listen :8443 \
+  -target http://127.0.0.1:3000 \
+  -tls-cert /etc/vigilante/fullchain.pem \
+  -tls-key  /etc/vigilante/privkey.pem
+```
+
+### 5. Run Behind / Alongside webong/gateway (Spinner ingress)
+Vigilante can act as the relay observation point for a [webong/gateway](https://github.com/webong/gateway) Spinner-style ingress: Spinner owns the public listener, forwarding, and optional PHP Planner; Vigilante mirrors every proxied request and dispatches enriched flows to its agent.
+
+```sh
+# Spinner-style ingress with Vigilante as the relay observer (fail-open to the
+# upstream if the Planner is unreachable):
+go run ./cmd/vigilante \
+  -mode spinner \
+  -listen :8080 \
+  -target http://127.0.0.1:3000 \
+  -planner-url http://127.0.0.1:8081 \
+  -planner-token "$INTERNAL_TOKEN"
+
+# With TLS termination on the public listener:
+go run ./cmd/vigilante -mode spinner -listen :8443 -target http://127.0.0.1:3000 \
+  -tls-cert /etc/vigilante/fullchain.pem -tls-key /etc/vigilante/privkey.pem
+```
+
+Health endpoints follow Spinner parity: `/health`, `/ready`, and `/metrics`
+(queue enqueued/dropped totals, observed request count).
+
+### 6. Embed the Tap In-Process (middleware mode)
+`-mode middleware` wraps the mirror tap around an existing handler seam — use it
+when Vigilante runs inside the same process as the application:
+
+```sh
+go run ./cmd/vigilante -mode middleware -listen :8080 -target http://127.0.0.1:3000
+```
+
+From Go code, embed directly with `tap.NewMirror`:
+
+```go
+queue := tap.NewMirrorQueue(256)
+queue.Drain(ctx, 2, func(ctx context.Context, ev agent.PacketEvent) { /* triage */ })
+http.ListenAndServe(":8080", tap.NewMirror(appHandler, queue, ":8080", "app:3000"))
+```
+
+### 7. Run Tests
 ```sh
 go test -race -v ./...
 ```
