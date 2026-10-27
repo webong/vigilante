@@ -20,6 +20,7 @@ import (
 	"net/http/httputil"
 	"net/url"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -96,12 +97,30 @@ type Server struct {
 	// extraMetrics, when set, appends additional metric lines to /metrics
 	// (e.g. alert store counters).
 	extraMetrics func(http.ResponseWriter)
+	// mounts holds optional path->handler mounts (e.g. the obs plugin bridge)
+	// added after construction; read at request time by the lazy handler.
+	mu       sync.RWMutex
+	mount    map[string]http.Handler
+	baseOnce sync.Once
+	baseH    http.Handler
 }
 
 // SetExtraMetrics registers a callback that writes additional metric lines to
 // the /metrics endpoint.
 func (s *Server) SetExtraMetrics(fn func(http.ResponseWriter)) {
 	s.extraMetrics = fn
+}
+
+// SetHandlerMount mounts an additional handler at prefix (e.g. "/obs") on the
+// ingress mux. Safe to call after NewServer; takes effect on subsequent
+// requests. Stripping of the prefix is the caller's responsibility.
+func (s *Server) SetHandlerMount(prefix string, h http.Handler) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.mount == nil {
+		s.mount = map[string]http.Handler{}
+	}
+	s.mount[prefix] = h
 }
 
 // NewServer builds the ingress. observe is invoked for every mirrored request.
@@ -161,12 +180,33 @@ func NewServer(opts Options, observe func(context.Context, agent.PacketEvent)) (
 
 	s.httpSrv = &http.Server{
 		Addr:         opts.ListenAddr,
-		Handler:      s.handler(),
+		Handler:      s,
 		ReadTimeout:  15 * time.Second,
 		WriteTimeout: 15 * time.Second,
 		IdleTimeout:  60 * time.Second,
 	}
 	return s, nil
+}
+
+// ServeHTTP implements http.Handler: it checks registered mounts (obs plugin)
+// first, then falls back to the composed status+relay mux.
+func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	s.mu.RLock()
+	mounts := s.mount
+	s.mu.RUnlock()
+	for prefix, h := range mounts {
+		if r.URL.Path == prefix || strings.HasPrefix(r.URL.Path, prefix+"/") {
+			http.StripPrefix(prefix, h).ServeHTTP(w, r)
+			return
+		}
+	}
+	s.base().ServeHTTP(w, r)
+}
+
+// base lazily composes the status+relay mux exactly once per server.
+func (s *Server) base() http.Handler {
+	s.baseOnce.Do(func() { s.baseH = s.handler() })
+	return s.baseH
 }
 
 // handler composes health endpoints with the Vigilante relay (/health,
