@@ -10,6 +10,7 @@ As packets and requests enter a system, Vigilante non-blockingly copies them int
 | --- | --- | --- |
 | **Hot-Path Network Tap** | `internal/tap` | Non-blocking HTTP reverse-proxy / middleware and TCP stream tee (`MirrorQueue`). Drops mirrored copies on backpressure so primary upstream traffic never stalls. Redacts sensitive auth/cookie headers before agent dispatch. Exposes `tap.NewMirror` / `tap.PreviewRequest` for in-process embedding and external ingress adapters. |
 | **Redaction & Sampling** | `internal/redact` + `tap.MirrorQueue` | Scrubs JWTs, API keys, bearer/basic auth, secret key-values, and emails from paths/queries/body previews (deterministic, counted); lock-free `-sample-rate` dispatches only a fraction of flows to the agent under load. |
+| **Agent Gateway + Backends** | `internal/agent` | One `ext.plugin/v1 vigilante.agent@v1` contract with selectable backends: **builtin** rule engine, **cli:&lt;cmd&gt;** (shells out to an external LLM/agent binary — envelope on stdin, JSON verdict on stdout, falls back to builtin), and **supervised** (out-of-process via `ext/res/system/supervisor` + jsonline). Reverse host callbacks (`read-source`, `query-graph`) available to all. |
 | **Dynamic Block Thresholds** | `internal/block.Threshold` | Auto-blocks a source after N qualifying verdicts in a sliding window (`-block-threshold`/`-block-window`/`-block-min-severity`); never blocks loopback. |
 | **Delivery Retry** | `internal/alert` | Webhook delivery retries transient failures with exponential backoff (attempts + base backoff configurable). |
 | **obs ext plugin** | `ext/obs` | Dashboard + JSON query API as a genuine `ext.plugin/v1` plugin behind an `engine.Session`; reads alerts from the core store, contributes per-severity metrics. |
@@ -51,7 +52,32 @@ go run ./cmd/vigilante -mode demo -repo git@gitlab.internal:platform/api.git -re
 # Env fallbacks: VIGILANTE_GIT_HOST, VIGILANTE_GIT_USER, VIGILANTE_GIT_TOKEN, VIGILANTE_GIT_SSH_KEY
 ```
 
-### 2. Run as an HTTP Reverse-Proxy Tap
+### 2. Agent Backends (builtin / CLI / supervised)
+Vigilante's triage runs behind one `ext.plugin/v1 vigilante.agent@v1` contract;
+the agent *implementation* is selectable:
+
+```sh
+# builtin (default): in-process rule/analysis engine
+go run ./cmd/vigilante -mode demo -repo .
+
+# cli:<command>: shell out to an external LLM/agent binary. The full enriched
+# envelope (OS + process + deps + codebase) is written to the command's stdin;
+# it prints a JSON Verdict on stdout (bare object, embedded, or ```fenced```).
+# On any failure it falls back to the builtin engine, so a broken CLI never
+# silences triage.
+go run ./cmd/vigilante -mode demo -repo . -agent cli:claude -agent-timeout 60s
+go run ./cmd/vigilante -mode demo -repo . -agent cli:/usr/local/bin/my-triage-agent
+
+# supervised: out-of-process agent via ext/res/system/supervisor + jsonline IPC
+go run ./cmd/vigilante -mode demo -repo . -agent supervised   # or -supervised-agent
+```
+
+The CLI agent sees the same context the builtin engine does (it's the same
+`EnrichedEnvelope`), so it can reason over OS/process/dependency/codebase data
+and call reverse host capabilities from its own environment. `-agent` accepts
+`agent: cli:<cmd>` in the config file.
+
+### 3. Run as an HTTP Reverse-Proxy Tap
 ```sh
 go run ./cmd/vigilante \
   -mode http \
@@ -60,7 +86,7 @@ go run ./cmd/vigilante \
   -graph-file ./vigilante-graph.json
 ```
 
-### 3. Run as a TCP Stream Tap
+### 4. Run as a TCP Stream Tap
 ```sh
 go run ./cmd/vigilante \
   -mode tcp \
@@ -68,7 +94,7 @@ go run ./cmd/vigilante \
   -target 127.0.0.1:5432
 ```
 
-### 4. Terminate TLS on the Tap (http / gateway modes)
+### 5. Terminate TLS on the Tap (http / gateway modes)
 ```sh
 go run ./cmd/vigilante \
   -mode http \
@@ -78,7 +104,7 @@ go run ./cmd/vigilante \
   -tls-key  /etc/vigilante/privkey.pem
 ```
 
-### 5. Gateway Ingress (local or external)
+### 6. Gateway Ingress (local or external)
 Vigilante's `-mode gateway` runs its own ingress (**local** posture) or attaches
 to an ingress/gateway **already running elsewhere** (**external** posture).
 Vigilante is vendor-neutral — external works with any gateway that speaks plain
@@ -109,7 +135,7 @@ go run ./cmd/vigilante -mode gateway -gateway local -listen :8443 -target http:/
 Health endpoints: `/health`, `/ready`, and `/metrics` (queue enqueued/dropped,
 observed request count).
 
-### 6. Embed the Tap In-Process (middleware mode)
+### 7. Embed the Tap In-Process (middleware mode)
 `-mode middleware` wraps the mirror tap around an existing handler seam — use it
 when Vigilante runs inside the same process as the application:
 
@@ -125,7 +151,7 @@ queue.Drain(ctx, 2, func(ctx context.Context, ev agent.PacketEvent) { /* triage 
 http.ListenAndServe(":8080", tap.NewMirror(appHandler, queue, ":8080", "app:3000"))
 ```
 
-### 7. Enforce Policy (allow / deny / block)
+### 8. Enforce Policy (allow / deny / block)
 Vigilante owns request admission: a declarative policy file gates every request
 before it is forwarded, and `block` verdicts are enforced through a pluggable
 backend (dry-run `log` by default, or real `iptables` / `nft`).
@@ -174,7 +200,7 @@ go run ./cmd/vigilante -mode http ... \
   -block-threshold 5 -block-window 1m -block-min-severity high -block-mode log
 ```
 
-### 8. Persist & Deliver Alerts
+### 9. Persist & Deliver Alerts
 Vigilante owns alerting: every agent verdict is appended to a rotating JSONL
 store and (optionally) POSTed as JSON to a webhook — directly, or through a
 webong/gateway Planner so Gateway's subscriber relays handle fan-out, retries,
@@ -205,7 +231,7 @@ transient failures with exponential backoff (default 3 attempts, 250ms base).
 When `-mode gateway` runs with a store, `/metrics` also exposes
 `vigilante_alerts_{stored,delivered,failed}_total`.
 
-### 9. Config File
+### 10. Config File
 For systemd/containers, put defaults in a config file and override per-deployment
 via CLI flags (flags always win):
 

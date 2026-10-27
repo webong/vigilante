@@ -3,6 +3,7 @@
   "listen": ":8080",
   "target": "http://127.0.0.1:3000",
   "repo": ".",
+  "agent": "builtin",
   "gateway": "local",
   "policy": "/etc/vigilante/policy.yaml",
   "block_mode": "log",
