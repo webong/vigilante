@@ -6,6 +6,7 @@ package tap
 import (
 	"bytes"
 	"context"
+	"fmt"
 	"io"
 	"math"
 	"math/rand"
@@ -254,9 +255,25 @@ func NewHTTPReverseProxyTap(targetURL *url.URL, queue *MirrorQueue, listenAddr s
 }
 
 // ProxyTCPConn copies a bidirectional TCP connection to targetAddr while teeing
-// the initial ingress packet sample into queue.
-func ProxyTCPConn(ctx context.Context, clientConn net.Conn, listenAddr, targetAddr string, queue *MirrorQueue) error {
+// ingress samples into queue. It applies a PolicyGate to the connection's
+// source address (deny/block before forwarding), redacts the payload preview,
+// and — when continuous sampling is on — keeps teeing periodic chunks rather
+// than only the first packet.
+func ProxyTCPConn(ctx context.Context, clientConn net.Conn, listenAddr, targetAddr string, queue *MirrorQueue, gate TCPGate) error {
 	defer clientConn.Close()
+
+	// Policy gate on the source address before touching the upstream.
+	if gate != nil {
+		srcIP := hostOnly(clientConn.RemoteAddr().String())
+		switch gate(srcIP) {
+		case "deny":
+			return fmt.Errorf("policy denied tcp connection from %s", srcIP)
+		case "block":
+			// Mirror the attempt for triage, then refuse to forward.
+			enqueueTCP(queue, listenAddr, targetAddr, clientConn.RemoteAddr().String(), nil, 0)
+			return fmt.Errorf("policy blocked tcp connection from %s", srcIP)
+		}
+	}
 
 	dialer := net.Dialer{Timeout: 5 * time.Second}
 	upstreamConn, err := dialer.DialContext(ctx, "tcp", targetAddr)
@@ -265,22 +282,14 @@ func ProxyTCPConn(ctx context.Context, clientConn net.Conn, listenAddr, targetAd
 	}
 	defer upstreamConn.Close()
 
-	// Tee the first ingress chunk for the agent without delaying subsequent stream bytes.
+	// Tee the first ingress chunk for the agent without delaying stream bytes.
 	sampleBuf := make([]byte, DefaultMaxPreviewBytes)
 	_ = clientConn.SetReadDeadline(time.Now().Add(250 * time.Millisecond))
 	n, readErr := clientConn.Read(sampleBuf)
 	_ = clientConn.SetReadDeadline(time.Time{})
 
 	if n > 0 {
-		queue.Enqueue(agent.PacketEvent{
-			Timestamp:      time.Now().UTC(),
-			Protocol:       "tcp",
-			SrcAddr:        clientConn.RemoteAddr().String(),
-			DstAddr:        listenAddr,
-			TargetAddr:     targetAddr,
-			PayloadPreview: string(sampleBuf[:n]),
-			PayloadBytes:   n,
-		})
+		enqueueTCP(queue, listenAddr, targetAddr, clientConn.RemoteAddr().String(), sampleBuf[:n], n)
 		if _, err := upstreamConn.Write(sampleBuf[:n]); err != nil {
 			return err
 		}
@@ -288,9 +297,29 @@ func ProxyTCPConn(ctx context.Context, clientConn net.Conn, listenAddr, targetAd
 		return readErr
 	}
 
+	// client->upstream: keep a low-rate rolling tee so long-lived connections
+	// (databases, streams) are observed beyond the first packet.
 	done := make(chan struct{}, 2)
 	go func() {
-		_, _ = io.Copy(upstreamConn, clientConn)
+		buf := make([]byte, 32<<10)
+		var sinceSample time.Duration
+		for {
+			nr, rerr := clientConn.Read(buf)
+			if nr > 0 {
+				if _, werr := upstreamConn.Write(buf[:nr]); werr != nil {
+					break
+				}
+				sinceSample += time.Duration(nr)
+				// Roughly every 64 KiB, emit another redacted sample.
+				if sinceSample >= 64<<10 {
+					enqueueTCP(queue, listenAddr, targetAddr, clientConn.RemoteAddr().String(), buf[:nr], nr)
+					sinceSample = 0
+				}
+			}
+			if rerr != nil {
+				break
+			}
+		}
 		done <- struct{}{}
 	}()
 	go func() {
@@ -304,6 +333,37 @@ func ProxyTCPConn(ctx context.Context, clientConn net.Conn, listenAddr, targetAd
 	case <-done:
 		return nil
 	}
+}
+
+// TCPGate evaluates a source IP and returns "allow", "deny", or "block".
+type TCPGate func(srcIP string) string
+
+// enqueueTCP builds and enqueues a TCP PacketEvent with payload redaction.
+func enqueueTCP(queue *MirrorQueue, listenAddr, targetAddr, remoteAddr string, payload []byte, n int) {
+	if queue == nil {
+		return
+	}
+	var preview string
+	if n > 0 {
+		preview = redact.String(string(payload))
+	}
+	queue.Enqueue(agent.PacketEvent{
+		Timestamp:      time.Now().UTC(),
+		Protocol:       "tcp",
+		SrcAddr:        remoteAddr,
+		DstAddr:        listenAddr,
+		TargetAddr:     targetAddr,
+		PayloadPreview: preview,
+		PayloadBytes:   n,
+	})
+}
+
+// hostOnly strips the port from an addr, leaving the IP.
+func hostOnly(addr string) string {
+	if h, _, err := net.SplitHostPort(addr); err == nil {
+		return h
+	}
+	return addr
 }
 
 type teeReadCloser struct {

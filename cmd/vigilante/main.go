@@ -19,6 +19,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"syscall"
@@ -361,7 +362,7 @@ func run(args []string, out io.Writer) error {
 	case "http":
 		return runHTTPProxy(ctx, out, corr, *listenAddr, *targetAddr, *queueSize, *tlsCert, *tlsKey, polGate, alertStore, *sampleRate, obsBridge, obsMetrics)
 	case "tcp":
-		return runTCPProxy(ctx, out, corr, *listenAddr, *targetAddr, *queueSize)
+		return runTCPProxy(ctx, out, corr, *listenAddr, *targetAddr, *queueSize, polGate, *sampleRate, *tlsCert, *tlsKey, alertStore, obsBridge, obsMetrics)
 	case "middleware":
 		return runMiddlewareMode(ctx, out, corr, *listenAddr, *targetAddr, *queueSize, *tlsCert, *tlsKey, polGate, alertStore, *sampleRate, obsBridge, obsMetrics)
 	case "gateway":
@@ -711,7 +712,7 @@ func runHTTPProxy(ctx context.Context, out io.Writer, corr *correlator.Correlato
 	return nil
 }
 
-func runTCPProxy(ctx context.Context, out io.Writer, corr *correlator.Correlator, listenAddr, targetAddr string, queueSize int) error {
+func runTCPProxy(ctx context.Context, out io.Writer, corr *correlator.Correlator, listenAddr, targetAddr string, queueSize int, httpGate tap.PolicyGate, sampleRate float64, tlsCert, tlsKey string, alertStore *alert.Store, obsB *obs.Bridge, obsM func(http.ResponseWriter)) error {
 	ln, err := net.Listen("tcp", listenAddr)
 	if err != nil {
 		return err
@@ -719,16 +720,36 @@ func runTCPProxy(ctx context.Context, out io.Writer, corr *correlator.Correlator
 	defer ln.Close()
 
 	queue := tap.NewMirrorQueue(queueSize)
+	queue.SetSampleRate(sampleRate)
+	registerQueue(queue)
 	queue.Drain(ctx, 2, func(ctx context.Context, ev agent.PacketEvent) {
 		_, _ = corr.ProcessPacket(ctx, ev)
 	})
+
+	// Bridge the HTTP-shaped policy gate to a source-IP gate for TCP.
+	var tcpGate tap.TCPGate
+	if httpGate != nil {
+		tcpGate = func(srcIP string) string {
+			req := httptest.NewRequest(http.MethodGet, "http://tcp/", nil)
+			req.RemoteAddr = net.JoinHostPort(srcIP, "0")
+			return httpGate(req)
+		}
+	}
+
+	// TCP has no HTTP listener of its own; expose status/obs on a small
+	// sidecar port (listenAddr with the port offset by +10000 is fragile, so we
+	// use an explicit admin listener only when obs is enabled).
+	if obsB != nil || obsM != nil {
+		adminAddr := adminAddrFor(listenAddr)
+		go serveTCPAdmin(ctx, out, adminAddr, queue, alertStatsOf(alertStore), obsB, obsM)
+	}
 
 	go func() {
 		<-ctx.Done()
 		_ = ln.Close()
 	}()
 
-	fmt.Fprintf(out, "[vigilante] TCP tap listening on %s -> forwarding to %s\n", listenAddr, targetAddr)
+	fmt.Fprintf(out, "[vigilante] TCP tap listening on %s -> forwarding to %s (policy gate: %v)\n", listenAddr, targetAddr, tcpGate != nil)
 	for {
 		conn, err := ln.Accept()
 		if err != nil {
@@ -738,8 +759,45 @@ func runTCPProxy(ctx context.Context, out io.Writer, corr *correlator.Correlator
 			return err
 		}
 		go func(c net.Conn) {
-			_ = tap.ProxyTCPConn(ctx, c, listenAddr, targetAddr, queue)
+			if err := tap.ProxyTCPConn(ctx, c, listenAddr, targetAddr, queue, tcpGate); err != nil && ctx.Err() == nil {
+				fmt.Fprintf(out, "[vigilante] tcp conn: %v\n", err)
+			}
 		}(conn)
+	}
+}
+
+// adminAddrFor derives a loopback admin address for TCP status/obs from the
+// primary listen address (same host, port+10000), avoiding collisions with the
+// data port.
+func adminAddrFor(listenAddr string) string {
+	host, portStr, err := net.SplitHostPort(listenAddr)
+	if err != nil {
+		return "127.0.0.1:0"
+	}
+	port, err := strconv.Atoi(portStr)
+	if err != nil {
+		return net.JoinHostPort(host, "0")
+	}
+	if host == "" || host == "0.0.0.0" || host == "::" {
+		host = "127.0.0.1"
+	}
+	return net.JoinHostPort(host, strconv.Itoa(port+10000))
+}
+
+// serveTCPAdmin runs the status/obs HTTP surface for TCP mode on a sidecar
+// listener so /healthz, /metrics, and the obs dashboard remain reachable.
+func serveTCPAdmin(ctx context.Context, out io.Writer, addr string, queue *tap.MirrorQueue, alertS status.AlertStats, obsB *obs.Bridge, obsM func(http.ResponseWriter)) {
+	mux := withStatus(http.NotFoundHandler(), queue, alertS, obsB, obsM)
+	srv := &http.Server{Addr: addr, Handler: mux}
+	go func() {
+		<-ctx.Done()
+		shutCtx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+		defer cancel()
+		_ = srv.Shutdown(shutCtx)
+	}()
+	fmt.Fprintf(out, "[vigilante] tcp admin surface on http://%s (healthz/metrics/obs)\n", addr)
+	if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+		fmt.Fprintf(out, "[vigilante] tcp admin: %v\n", err)
 	}
 }
 

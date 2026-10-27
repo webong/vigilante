@@ -3,6 +3,7 @@ package tap
 import (
 	"context"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -35,6 +36,59 @@ func TestPreviewRequestRedactsSecrets(t *testing.T) {
 	// Body must be restored for the real handler.
 	if ev.PayloadBytes == 0 {
 		t.Fatal("payload bytes not recorded")
+	}
+}
+
+func TestTCPGateDenies(t *testing.T) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Skip("cannot listen:", err)
+	}
+	defer ln.Close()
+	go func() {
+		for {
+			c, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			_ = c.Close()
+		}
+	}()
+
+	q := NewMirrorQueue(4)
+	denyGate := func(string) string { return "deny" }
+	conn, err := net.Dial("tcp", ln.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- ProxyTCPConn(context.Background(), conn, "l", "t", q, denyGate)
+	}()
+	if err := <-errCh; err == nil {
+		t.Fatal("deny gate should return an error and refuse to forward")
+	}
+}
+
+// TestTCPRedactsPayload verifies payload previews are scrubbed before enqueue.
+func TestTCPRedactsPayload(t *testing.T) {
+	q := NewMirrorQueue(4)
+	enqueueTCP(q, "l", "t", "1.2.3.4:99", []byte(`token=sk-abcdefghijklmnop`), 24)
+	ev := <-q.Events()
+	if strings.Contains(ev.PayloadPreview, "sk-abcdefghijklmnop") {
+		t.Fatalf("tcp payload leaked secret: %s", ev.PayloadPreview)
+	}
+	if !strings.Contains(ev.PayloadPreview, "[REDACTED]") {
+		t.Fatalf("expected redaction marker: %s", ev.PayloadPreview)
+	}
+	if ev.Protocol != "tcp" {
+		t.Fatalf("protocol = %s", ev.Protocol)
+	}
+}
+
+func TestHostOnly(t *testing.T) {
+	if got := hostOnly("1.2.3.4:5678"); got != "1.2.3.4" {
+		t.Fatalf("hostOnly = %q", got)
 	}
 }
 
