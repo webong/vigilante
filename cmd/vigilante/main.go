@@ -34,6 +34,7 @@ import (
 	"github.com/webong/vigilante/internal/policy"
 	"github.com/webong/vigilante/internal/repo"
 	"github.com/webong/vigilante/internal/schema"
+	"github.com/webong/vigilante/internal/status"
 	"github.com/webong/vigilante/internal/tap"
 )
 
@@ -72,9 +73,79 @@ func run(args []string, out io.Writer) error {
 	queueSize := fs.Int("queue-size", 256, "Bounded packet mirror ring-buffer capacity")
 	supervisedAgent := fs.Bool("supervised-agent", false, "Launch agent out-of-process via ext/res/system/supervisor + jsonline IPC")
 	agentIPC := fs.String("agent-ipc", "", "Internal IPC address when running in -mode agent-worker")
+	configPath := fs.String("config", "", "Path to a config file (JSON or flat YAML) supplying defaults for any unset flag")
 
 	if err := fs.Parse(args); err != nil {
 		return err
+	}
+
+	// Apply config-file values for any flag the user did not set explicitly
+	// (CLI flags always win).
+	cfg, err := loadConfig(*configPath)
+	if err != nil {
+		return err
+	}
+	set := map[string]bool{}
+	fs.Visit(func(f *flag.Flag) { set[f.Name] = true })
+	if !set["mode"] && cfg.Mode != "" {
+		*mode = cfg.Mode
+	}
+	if !set["listen"] && cfg.Listen != "" {
+		*listenAddr = cfg.Listen
+	}
+	if !set["target"] && cfg.Target != "" {
+		*targetAddr = cfg.Target
+	}
+	if !set["repo"] && cfg.Repo != "" {
+		*repoTarget = cfg.Repo
+	}
+	if !set["repo-ref"] && cfg.RepoRef != "" {
+		*repoRef = cfg.RepoRef
+	}
+	if !set["repo-user"] && cfg.RepoUser != "" {
+		*repoUser = cfg.RepoUser
+	}
+	if !set["repo-token"] && cfg.RepoToken != "" {
+		*repoToken = cfg.RepoToken
+	}
+	if !set["repo-ssh-key"] && cfg.RepoSSHKey != "" {
+		*repoSSHKey = cfg.RepoSSHKey
+	}
+	if !set["tls-cert"] && cfg.TLSCert != "" {
+		*tlsCert = cfg.TLSCert
+	}
+	if !set["tls-key"] && cfg.TLSKey != "" {
+		*tlsKey = cfg.TLSKey
+	}
+	if !set["planner-url"] && cfg.PlannerURL != "" {
+		*plannerURL = cfg.PlannerURL
+	}
+	if !set["planner-token"] && cfg.PlannerToken != "" {
+		*plannerToken = cfg.PlannerToken
+	}
+	if !set["policy"] && cfg.Policy != "" {
+		*policyFile = cfg.Policy
+	}
+	if !set["block-mode"] && cfg.BlockMode != "" {
+		*blockMode = cfg.BlockMode
+	}
+	if !set["block-chain"] && cfg.BlockChain != "" {
+		*blockChain = cfg.BlockChain
+	}
+	if !set["alert-file"] && cfg.AlertFile != "" {
+		*alertFile = cfg.AlertFile
+	}
+	if !set["alert-deliver-url"] && cfg.AlertDeliver != "" {
+		*alertDeliver = cfg.AlertDeliver
+	}
+	if !set["alert-min-severity"] && cfg.AlertMinSev != "" {
+		*alertMinSev = cfg.AlertMinSev
+	}
+	if !set["queue-size"] && cfg.QueueSize > 0 {
+		*queueSize = cfg.QueueSize
+	}
+	if !set["supervised-agent"] && cfg.Supervised {
+		*supervisedAgent = true
 	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
@@ -88,7 +159,6 @@ func run(args []string, out io.Writer) error {
 	}
 
 	var store graph.Store
-	var err error
 	if *graphFile != "" {
 		store, err = graph.OpenFile(*graphFile)
 		if err != nil {
@@ -249,11 +319,11 @@ func run(args []string, out io.Writer) error {
 	case "demo":
 		return runDemo(ctx, out, corr, store, *supervisedAgent)
 	case "http":
-		return runHTTPProxy(ctx, out, corr, *listenAddr, *targetAddr, *queueSize, *tlsCert, *tlsKey, polGate)
+		return runHTTPProxy(ctx, out, corr, *listenAddr, *targetAddr, *queueSize, *tlsCert, *tlsKey, polGate, alertStore)
 	case "tcp":
 		return runTCPProxy(ctx, out, corr, *listenAddr, *targetAddr, *queueSize)
 	case "middleware":
-		return runMiddlewareMode(ctx, out, corr, *listenAddr, *targetAddr, *queueSize, *tlsCert, *tlsKey, polGate)
+		return runMiddlewareMode(ctx, out, corr, *listenAddr, *targetAddr, *queueSize, *tlsCert, *tlsKey, polGate, alertStore)
 	case "spinner":
 		return runSpinnerMode(ctx, out, corr, *listenAddr, *targetAddr, *plannerURL, *plannerToken, *tlsCert, *tlsKey, *queueSize, polGate, alertStore)
 	default:
@@ -265,7 +335,7 @@ func run(args []string, out io.Writer) error {
 // handler seam (tap.NewMirror): it observes every request and forwards to the
 // upstream target, terminating TLS when configured. This is the mode to use
 // when Vigilante runs inside the same process as the application.
-func runMiddlewareMode(ctx context.Context, out io.Writer, corr *correlator.Correlator, listenAddr, targetRaw string, queueSize int, tlsCert, tlsKey string, gate tap.PolicyGate) error {
+func runMiddlewareMode(ctx context.Context, out io.Writer, corr *correlator.Correlator, listenAddr, targetRaw string, queueSize int, tlsCert, tlsKey string, gate tap.PolicyGate, alertStore *alert.Store) error {
 	if !strings.Contains(targetRaw, "://") {
 		targetRaw = "http://" + targetRaw
 	}
@@ -279,7 +349,9 @@ func runMiddlewareMode(ctx context.Context, out io.Writer, corr *correlator.Corr
 		_, _ = corr.ProcessPacket(ctx, ev)
 	})
 
-	handler := tap.HTTPMiddlewareGate(httputil.NewSingleHostReverseProxy(targetURL), queue, listenAddr, targetURL.Host, gate)
+	handler := withStatus(
+		tap.HTTPMiddlewareGate(httputil.NewSingleHostReverseProxy(targetURL), queue, listenAddr, targetURL.Host, gate),
+		queue, alertStatsOf(alertStore))
 	srv := &http.Server{Addr: listenAddr, Handler: handler}
 
 	go func() {
@@ -346,6 +418,27 @@ func runSpinnerMode(ctx context.Context, out io.Writer, corr *correlator.Correla
 		return err
 	}
 	return nil
+}
+
+// withStatus mounts the status endpoints (/healthz, /health, /ready, /metrics)
+// alongside the main handler: status paths go to status.Handler, everything
+// else to next (the tap/proxy).
+func withStatus(next http.Handler, queue *tap.MirrorQueue, alert status.AlertStats) http.Handler {
+	mux := http.NewServeMux()
+	mux.Handle("/healthz", status.Handler(queue, alert))
+	mux.Handle("/health", status.Handler(queue, alert))
+	mux.Handle("/ready", status.Handler(queue, alert))
+	mux.Handle("/metrics", status.Handler(queue, alert))
+	mux.Handle("/", next)
+	return mux
+}
+
+// alertStats adapts *alert.Store to the status package's counter signature.
+func alertStatsOf(s *alert.Store) status.AlertStats {
+	if s == nil {
+		return nil
+	}
+	return func() (uint64, uint64, uint64) { return s.Stats() }
 }
 
 func orDash(s string) string {
@@ -454,7 +547,7 @@ func runDemo(ctx context.Context, out io.Writer, corr *correlator.Correlator, st
 	return nil
 }
 
-func runHTTPProxy(ctx context.Context, out io.Writer, corr *correlator.Correlator, listenAddr, targetRaw string, queueSize int, tlsCert, tlsKey string, gate tap.PolicyGate) error {
+func runHTTPProxy(ctx context.Context, out io.Writer, corr *correlator.Correlator, listenAddr, targetRaw string, queueSize int, tlsCert, tlsKey string, gate tap.PolicyGate, alertStore *alert.Store) error {
 	if !strings.Contains(targetRaw, "://") {
 		targetRaw = "http://" + targetRaw
 	}
@@ -469,8 +562,10 @@ func runHTTPProxy(ctx context.Context, out io.Writer, corr *correlator.Correlato
 	})
 
 	srv := &http.Server{
-		Addr:    listenAddr,
-		Handler: tap.HTTPMiddlewareGate(tap.NewHTTPReverseProxyTap(targetURL, queue, listenAddr), queue, listenAddr, targetURL.Host, gate),
+		Addr: listenAddr,
+		Handler: withStatus(
+			tap.HTTPMiddlewareGate(tap.NewHTTPReverseProxyTap(targetURL, queue, listenAddr), queue, listenAddr, targetURL.Host, gate),
+			queue, alertStatsOf(alertStore)),
 	}
 
 	go func() {
