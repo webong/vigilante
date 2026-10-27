@@ -73,7 +73,7 @@ func run(args []string, out io.Writer) error {
 	alertMaxBytes := fs.Int64("alert-max-bytes", 10<<20, "Rotate the alert file after this many bytes")
 	alertKeep := fs.Int("alert-keep", 3, "Number of rotated alert files to retain")
 	sampleRate := fs.Float64("sample-rate", 1.0, "Fraction [0,1] of mirrored flows dispatched to the agent (<=0 or 1 = all); sampling never affects primary traffic")
-	repoTarget := fs.String("repo", ".", "Git repo target to index for codebase awareness: any host URL (https/ssh/git/file://, scp-like git@host:path), owner/repo or host/owner/repo shorthand, or a local path")
+	repoTarget := fs.String("repo", ".", "Git repo target to index for codebase awareness: any host URL (https/ssh/git/file://, scp-like git@host:path), owner/repo or host/owner/repo shorthand, a local path, or \"auto\" to discover the target service's source root from -target")
 	repoRef := fs.String("repo-ref", "", "Branch or tag to shallow-clone for -repo (empty = remote default branch)")
 	repoUser := fs.String("repo-user", "", "HTTPS username for private -repo clones (default: x-access-token, or VIGILANTE_GIT_USER)")
 	repoToken := fs.String("repo-token", "", "HTTPS auth token for private -repo clones (prefer the VIGILANTE_GIT_TOKEN env var to keep it out of argv)")
@@ -192,6 +192,19 @@ func run(args []string, out io.Writer) error {
 	sysGraph, err := system.New(store)
 	if err != nil {
 		return fmt.Errorf("init ext.system graph: %w", err)
+	}
+
+	// Auto-discovery: when -repo is "auto" (or empty), infer the target's
+	// source root from -target (port -> listening PID -> open cwd / checkout).
+	target := strings.TrimSpace(*targetAddr)
+	if t := strings.ToLower(strings.TrimSpace(*repoTarget)); t == "auto" || t == "" {
+		if root := repo.DiscoverRoot(ctx, target); root != "" {
+			fmt.Fprintf(out, "[vigilante] discovered codebase root %s for target %s\n", root, target)
+			*repoTarget = root
+		} else {
+			fmt.Fprintf(out, "[vigilante] auto repo discovery found no source root for %s; codebase context disabled\n", orDash(target))
+			*repoTarget = ""
+		}
 	}
 
 	var repoIdx *repo.Index
