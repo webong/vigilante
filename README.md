@@ -9,6 +9,7 @@ As packets and requests enter a system, Vigilante non-blockingly copies them int
 | Layer | Package | Responsibility |
 | --- | --- | --- |
 | **Hot-Path Network Tap** | `internal/tap` | Non-blocking HTTP reverse-proxy / middleware and TCP stream tee (`MirrorQueue`). Drops mirrored copies on backpressure so primary upstream traffic never stalls. Redacts sensitive auth/cookie headers before agent dispatch. Exposes `tap.NewMirror` / `tap.PreviewRequest` for in-process embedding and external ingress adapters. |
+| **Redaction & Sampling** | `internal/redact` + `tap.MirrorQueue` | Scrubs JWTs, API keys, bearer/basic auth, secret key-values, and emails from paths/queries/body previews (deterministic, counted); lock-free `-sample-rate` dispatches only a fraction of flows to the agent under load. |
 | **Status Endpoints** | `internal/status` | Shared `/healthz`, `/health`, `/ready`, and `/metrics` (queue + alert counters) mounted on every HTTP-serving mode. |
 | **Alert Store & Delivery** | `internal/alert` | Append-only JSONL verdict store with size-based rotation and severity filtering; pluggable delivery — direct webhook POST or via a webong/gateway Planner (`/vigilante/alerts`) so subscriber relays own fan-out/retries. Failures are counted, never block the hot path. |
 | **Policy & Block Enforcement** | `internal/policy` + `internal/block` | Declarative allow/deny/block rules (path globs, hosts, methods, CIDRs) evaluated before forwarding; `block` verdicts enforced via a pluggable backend — dry-run `log`, `iptables`, or `nft` — with loopback/unspecified guards and idempotent chain provisioning. |
@@ -211,10 +212,31 @@ Unknown keys are rejected to catch typos early.
 Every HTTP-serving mode (`http`, `middleware`, `spinner`) exposes:
 - `GET /healthz` (alias `/health`) → `ok`
 - `GET /ready` → `ready`
-- `GET /metrics` → `vigilante_queue_{enqueued,dropped}_total`,
+- `GET /metrics` → `vigilante_queue_{enqueued,dropped,sampled_out}_total`,
+  `vigilante_redact_hits_total`,
   `vigilante_alerts_{stored,delivered,failed}_total` (when an alert store is on)
 
-### 11. Run Tests
+### 11. Redaction & Sampling (safe at volume)
+Mirrored traffic is scrubbed before it reaches the agent or the alert store:
+paths, query strings, and body previews have JWTs, `sk-`/`ghp_`/`AKIA`/Slack
+tokens, bearer/basic auth, `password`/`token`/`secret` key-values, and email
+addresses replaced with `[REDACTED]` (sensitive headers were already masked).
+Redaction is deterministic and counted in `vigilante_redact_hits_total`.
+
+Sampling lets a busy server dispatch only a fraction of flows to the agent —
+never affecting primary traffic:
+
+```sh
+# Triaged 1 in 10 flows (policy deny/block requests are still enforced):
+go run ./cmd/vigilante -mode http -listen :8080 -target http://127.0.0.1:3000 \
+  -sample-rate 0.1
+```
+
+`-sample-rate` accepts `0..1` (`<=0` or `1` = mirror all), can also be set as
+`sample_rate` in the config file, and reports skipped flows via
+`vigilante_queue_sampled_out_total`.
+
+### 12. Run Tests
 ```sh
 go test -race -v ./...
 ```
