@@ -1,0 +1,40 @@
+[Unit]
+Description=Vigilante network security gateway
+Documentation=https://github.com/webong/vigilante
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+# Point -config at your config file; CLI flags in ExecStart override it.
+ExecStart=/usr/local/bin/vigilante -config /etc/vigilante/vigilante.json
+Restart=on-failure
+RestartSec=3
+
+# Run as a dedicated unprivileged user for the tap; grant CAP_NET_ADMIN only
+# when using -block-mode iptables/nft (see comments below).
+User=vigilante
+Group=vigilante
+
+# Alert store + config locations.
+Environment=VIGILANTE_STATE=/var/lib/vigilante
+StateDirectory=vigilante
+LogsDirectory=vigilante
+ConfigurationDirectory=vigilante
+
+# Hardening.
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+ReadWritePaths=/var/lib/vigilante /var/log/vigilante
+# For -block-mode iptables/nft, add:
+#   AmbientCapabilities=CAP_NET_ADMIN
+#   CapabilityBoundingSet=CAP_NET_ADMIN
+
+# Secret material (repo token, planner token) should come from a credential
+# file, not the unit file:
+# EnvironmentFile=-/etc/vigilante/vigilante.env
+
+[Install]
+WantedBy=multi-user.target

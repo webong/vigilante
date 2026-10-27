@@ -1,0 +1,6 @@
+.git
+*.graph.json
+vigilante-graph.json
+*.test
+coverage.txt
+.DS_Store

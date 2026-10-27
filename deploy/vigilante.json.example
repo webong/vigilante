@@ -1,0 +1,13 @@
+{
+  "mode": "http",
+  "listen": ":8080",
+  "target": "http://127.0.0.1:3000",
+  "repo": ".",
+  "gateway": "local",
+  "policy": "/etc/vigilante/policy.yaml",
+  "block_mode": "log",
+  "alert_file": "/var/log/vigilante/alerts.jsonl",
+  "alert_min_severity": "high",
+  "queue_size": 1024,
+  "sample_rate": 1.0
+}
