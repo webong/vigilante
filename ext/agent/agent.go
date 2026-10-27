@@ -26,6 +26,7 @@ import (
 	"github.com/webong/ext/res/system"
 	"github.com/webong/ext/res/system/graph"
 	"github.com/webong/ext/res/system/network"
+	"github.com/webong/vigilante/ext/redact"
 	"github.com/webong/vigilante/internal/deps"
 	"github.com/webong/vigilante/internal/repo"
 )
@@ -55,6 +56,29 @@ type PacketEvent struct {
 	Headers        map[string]string `json:"headers,omitempty"`
 	PayloadPreview string            `json:"payload_preview,omitempty"`
 	PayloadBytes   int               `json:"payload_bytes"`
+}
+
+// Redact scrubs secrets (JWTs, API keys, bearer/basic auth, secret key-values,
+// emails) from the event's path, query, headers, and payload preview in place.
+// It is safe to call from any producer (tap, gateway, passive sensor) before
+// the event enters the mirror queue.
+func (e *PacketEvent) Redact() {
+	if e.Path != "" {
+		e.Path = redact.String(e.Path)
+	}
+	if e.PayloadPreview != "" {
+		e.PayloadPreview = redact.String(e.PayloadPreview)
+	}
+	if len(e.Headers) > 0 {
+		for k, v := range e.Headers {
+			if v == "[REDACTED]" {
+				continue
+			}
+			if red := redact.String(v); red != v {
+				e.Headers[k] = red
+			}
+		}
+	}
 }
 
 // OSContext summarizes the host OS state discovered via github.com/webong/ext/res/system.

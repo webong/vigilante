@@ -30,6 +30,7 @@ import (
 	"github.com/webong/ext/res/system/supervisor"
 	"github.com/webong/vigilante/ext/agent"
 	"github.com/webong/vigilante/ext/obs"
+	"github.com/webong/vigilante/ext/tap"
 	"github.com/webong/vigilante/internal/alert"
 	"github.com/webong/vigilante/internal/block"
 	"github.com/webong/vigilante/internal/correlator"
@@ -38,7 +39,6 @@ import (
 	"github.com/webong/vigilante/internal/repo"
 	"github.com/webong/vigilante/internal/schema"
 	"github.com/webong/vigilante/internal/status"
-	"github.com/webong/vigilante/internal/tap"
 )
 
 func main() {
@@ -52,7 +52,9 @@ func run(args []string, out io.Writer) error {
 	fs := flag.NewFlagSet("vigilante", flag.ContinueOnError)
 	fs.SetOutput(out)
 
-	mode := fs.String("mode", "demo", "Execution mode: demo, http, tcp, middleware, gateway, or agent-worker")
+	mode := fs.String("mode", "demo", "Execution mode: demo, http, tcp, middleware, gateway, passive, or agent-worker")
+	passiveIface := fs.String("passive-iface", "", "Interface to passively sniff in -mode passive (e.g. eth0; requires root/CAP_NET_RAW)")
+	passivePorts := fs.String("passive-ports", "", "Comma-separated ports to capture in -mode passive (empty = all)")
 	listenAddr := fs.String("listen", "127.0.0.1:8080", "Address for vigilante middleware to listen on")
 	targetAddr := fs.String("target", "http://127.0.0.1:9000", "Upstream server URL (for http/gateway) or host:port (for tcp)")
 	tlsCert := fs.String("tls-cert", "", "TLS certificate file for HTTPS on -listen (http/gateway modes)")
@@ -430,8 +432,10 @@ func run(args []string, out io.Writer) error {
 			*targetAddr = gwExternal
 		}
 		return runGatewayMode(ctx, out, corr, *listenAddr, *targetAddr, *plannerURL, *plannerToken, *tlsCert, *tlsKey, *queueSize, polGate, alertStore, *sampleRate, gwPosture, gwExternal, obsBridge, obsMetrics)
+	case "passive":
+		return runPassiveMode(ctx, out, corr, *passiveIface, *passivePorts, *queueSize, *sampleRate, alertStore, obsBridge, obsMetrics)
 	default:
-		return fmt.Errorf("unsupported mode %q (choose demo, http, tcp, middleware, gateway, or agent-worker)", *mode)
+		return fmt.Errorf("unsupported mode %q (choose demo, http, tcp, middleware, gateway, passive, or agent-worker)", *mode)
 	}
 }
 

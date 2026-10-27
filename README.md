@@ -8,8 +8,8 @@ As packets and requests enter a system, Vigilante non-blockingly copies them int
 
 | Layer | Package | Responsibility |
 | --- | --- | --- |
-| **Hot-Path Network Tap** | `internal/tap` | Non-blocking HTTP reverse-proxy / middleware and TCP stream tee (`MirrorQueue`). Drops mirrored copies on backpressure so primary upstream traffic never stalls. Redacts sensitive auth/cookie headers before agent dispatch. Exposes `tap.NewMirror` / `tap.PreviewRequest` for in-process embedding and external ingress adapters. |
-| **Redaction & Sampling** | `internal/redact` + `tap.MirrorQueue` | Scrubs JWTs, API keys, bearer/basic auth, secret key-values, and emails from paths/queries/body previews (deterministic, counted); lock-free `-sample-rate` dispatches only a fraction of flows to the agent under load. |
+| **Sensor Network Tap** | `ext/tap` | Non-blocking HTTP reverse-proxy / middleware and TCP stream tee (`MirrorQueue`) plus a **passive AF_PACKET sensor** (`-mode passive`) that observes interface traffic *without* being in the forwarding path — Vigilante as a drop-in sensor. Drops mirrored copies on backpressure so primary traffic never stalls. Redacts secrets before agent dispatch. Exposes `tap.NewMirror` / `tap.PreviewRequest` for embedding and external ingress adapters. |
+| **Redaction & Sampling** | `ext/redact` + `tap.MirrorQueue` | Scrubs JWTs, API keys, bearer/basic auth, secret key-values, and emails from paths/queries/body previews (deterministic, counted); lock-free `-sample-rate` dispatches only a fraction of flows to the agent under load. |
 | **Agent Gateway + Backends** | `ext/agent` | One `ext.plugin/v1 vigilante.agent@v1` contract with selectable backends: **builtin** rule engine, **cli:&lt;cmd&gt;** (shells out to an external LLM/agent binary — envelope on stdin, JSON verdict on stdout, falls back to builtin), and **supervised** (out-of-process via `ext/res/system/supervisor` + jsonline). Reverse host callbacks (`read-source`, `query-graph`) available to all. Lives in `ext/` because the agent is itself an ext plugin. |
 | **Dynamic Block Thresholds** | `internal/block.Threshold` | Auto-blocks a source after N qualifying verdicts in a sliding window (`-block-threshold`/`-block-window`/`-block-min-severity`); never blocks loopback. |
 | **Delivery Retry** | `internal/alert` | Webhook delivery retries transient failures with exponential backoff (attempts + base backoff configurable). |
@@ -135,7 +135,26 @@ go run ./cmd/vigilante -mode gateway -gateway local -listen :8443 -target http:/
 Health endpoints: `/health`, `/ready`, and `/metrics` (queue enqueued/dropped,
 observed request count).
 
-### 7. Embed the Tap In-Process (middleware mode)
+### 7. Passive Sensor Mode (observe real traffic — Linux)
+Vigilante can act as a **drop-in sensor**, not just a gateway: `-mode passive`
+sniffs an interface with `AF_PACKET` and feeds captured flows into the same
+enrichment/agent pipeline **without being in the forwarding path**. Your app
+keeps serving traffic unchanged; Vigilante just watches.
+
+```sh
+# Observe all IP traffic on eth0 (requires root or CAP_NET_RAW):
+sudo go run ./cmd/vigilante -mode passive -passive-iface eth0 -repo auto
+
+# Only capture traffic to/from specific service ports:
+sudo go run ./cmd/vigilante -mode passive -passive-iface eth0 \
+  -passive-ports 80,443,8080 -repo auto -alert-file /var/log/vigilante/alerts.jsonl
+```
+
+Linux-only (`AF_PACKET`). It never forwards or modifies packets; status/obs are
+served on a loopback sidecar. This is the posture for observing production
+traffic you don't control the ingress for.
+
+### 8. Embed the Tap In-Process (middleware mode)
 `-mode middleware` wraps the mirror tap around an existing handler seam — use it
 when Vigilante runs inside the same process as the application:
 
@@ -151,7 +170,7 @@ queue.Drain(ctx, 2, func(ctx context.Context, ev agent.PacketEvent) { /* triage 
 http.ListenAndServe(":8080", tap.NewMirror(appHandler, queue, ":8080", "app:3000"))
 ```
 
-### 8. Enforce Policy (allow / deny / block)
+### 9. Enforce Policy (allow / deny / block)
 Vigilante owns request admission: a declarative policy file gates every request
 before it is forwarded, and `block` verdicts are enforced through a pluggable
 backend (dry-run `log` by default, or real `iptables` / `nft`).
@@ -200,7 +219,7 @@ go run ./cmd/vigilante -mode http ... \
   -block-threshold 5 -block-window 1m -block-min-severity high -block-mode log
 ```
 
-### 9. Persist & Deliver Alerts
+### 10. Persist & Deliver Alerts
 Vigilante owns alerting: every agent verdict is appended to a rotating JSONL
 store and (optionally) POSTed as JSON to a webhook — directly, or through a
 webong/gateway Planner so Gateway's subscriber relays handle fan-out, retries,
@@ -231,7 +250,7 @@ transient failures with exponential backoff (default 3 attempts, 250ms base).
 When `-mode gateway` runs with a store, `/metrics` also exposes
 `vigilante_alerts_{stored,delivered,failed}_total`.
 
-### 10. Config File
+### 11. Config File
 For systemd/containers, put defaults in a config file and override per-deployment
 via CLI flags (flags always win):
 
@@ -259,7 +278,7 @@ go run ./cmd/vigilante -config vigilante.json -listen :9443 -tls-cert cert.pem -
 Flat YAML (`key: value` lines) is also accepted; lists/objects belong in JSON.
 Unknown keys are rejected to catch typos early.
 
-### 11. Install (personal computer or server)
+### 12. Install (personal computer or server)
 
 **Binary + optional systemd service:**
 ```sh
@@ -280,7 +299,7 @@ systemd unit), [`deploy/vigilante.json.example`](deploy/vigilante.json.example),
 [`Dockerfile`](Dockerfile). For `-block-mode iptables|nft`, the unit needs
 `CAP_NET_ADMIN` (commented in the unit file).
 
-### 12. Dashboard & Plugin API (obs ext plugin)
+### 13. Dashboard & Plugin API (obs ext plugin)
 With an alert store present (default on via `-obs`), the **obs ext plugin**
 (`ext.plugin/v1 vigilante.obs@v1`) serves:
 
@@ -293,7 +312,7 @@ It lives in [`ext/obs`](ext/obs) (plugins live under `ext/`, not `internal/`),
 runs behind a real `engine.Session`, and reads alerts from the core JSONL store
 without owning persistence.
 
-### 13. Health & Metrics (all modes)
+### 14. Health & Metrics (all modes)
 Every HTTP-serving mode (`http`, `middleware`, `gateway`) exposes:
 - `GET /healthz` (alias `/health`) → `ok`
 - `GET /ready` → `ready`
@@ -301,7 +320,7 @@ Every HTTP-serving mode (`http`, `middleware`, `gateway`) exposes:
   `vigilante_redact_hits_total`,
   `vigilante_alerts_{stored,delivered,failed}_total` (when an alert store is on)
 
-### 14. Redaction & Sampling (safe at volume)
+### 15. Redaction & Sampling (safe at volume)
 Mirrored traffic is scrubbed before it reaches the agent or the alert store:
 paths, query strings, and body previews have JWTs, `sk-`/`ghp_`/`AKIA`/Slack
 tokens, bearer/basic auth, `password`/`token`/`secret` key-values, and email
@@ -321,7 +340,7 @@ go run ./cmd/vigilante -mode http -listen :8080 -target http://127.0.0.1:3000 \
 `sample_rate` in the config file, and reports skipped flows via
 `vigilante_queue_sampled_out_total`.
 
-### 15. Run Tests
+### 16. Run Tests
 ```sh
 go test -race -v ./...
 ```

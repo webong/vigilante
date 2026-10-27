@@ -19,8 +19,12 @@ import (
 	"time"
 
 	"github.com/webong/vigilante/ext/agent"
-	"github.com/webong/vigilante/internal/redact"
+	"github.com/webong/vigilante/ext/redact"
 )
+
+// PacketEvent is re-exported from ext/agent so tap producers and the sensor
+// share one event type.
+type PacketEvent = agent.PacketEvent
 
 // Mirror is the minimal seam a host application needs to embed Vigilante in
 // its own HTTP stack: it observes (clones) each request into the mirror queue
@@ -244,6 +248,7 @@ func PreviewRequest(queue *MirrorQueue, r *http.Request, listenAddr, targetAddr 
 	if q := r.URL.RawQuery; q != "" {
 		ev.Path += "?" + redact.Query(q)
 	}
+	ev.Redact()
 	queue.Enqueue(ev)
 }
 

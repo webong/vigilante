@@ -7,8 +7,8 @@ import (
 	"fmt"
 	"net/http"
 
-	"github.com/webong/vigilante/internal/redact"
-	"github.com/webong/vigilante/internal/tap"
+	"github.com/webong/vigilante/ext/redact"
+	"github.com/webong/vigilante/ext/tap"
 )
 
 // AlertStats reports alert store counters (nil-safe).

@@ -25,7 +25,7 @@ import (
 	"time"
 
 	"github.com/webong/vigilante/ext/agent"
-	"github.com/webong/vigilante/internal/tap"
+	"github.com/webong/vigilante/ext/tap"
 )
 
 // Mode selects how Vigilante's ingress relates to a peer gateway/ingress.
