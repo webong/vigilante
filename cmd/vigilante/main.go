@@ -18,6 +18,7 @@ import (
 	"net/url"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"strings"
 	"syscall"
 	"time"
@@ -26,6 +27,7 @@ import (
 	"github.com/webong/ext/res/system/graph"
 	"github.com/webong/ext/res/system/supervisor"
 	"github.com/webong/vigilante/internal/agent"
+	"github.com/webong/vigilante/internal/alert"
 	"github.com/webong/vigilante/internal/block"
 	"github.com/webong/vigilante/internal/correlator"
 	"github.com/webong/vigilante/internal/gateway"
@@ -56,6 +58,11 @@ func run(args []string, out io.Writer) error {
 	policyFile := fs.String("policy", "", "Path to a policy file (YAML/JSON) with allow/deny/block rules")
 	blockMode := fs.String("block-mode", "log", "Block enforcement mode: log (dry-run), iptables, or nft")
 	blockChain := fs.String("block-chain", "VIGILANTE", "iptables/nft chain name for block enforcement")
+	alertFile := fs.String("alert-file", "", "Path to the JSONL alert store (enables persistence; rotated by size)")
+	alertMinSev := fs.String("alert-min-severity", "", "Minimum verdict severity to record/deliver: info, low, medium, high, critical")
+	alertDeliver := fs.String("alert-deliver-url", "", "Webhook URL to POST alerts to (direct when no planner is configured)")
+	alertMaxBytes := fs.Int64("alert-max-bytes", 10<<20, "Rotate the alert file after this many bytes")
+	alertKeep := fs.Int("alert-keep", 3, "Number of rotated alert files to retain")
 	repoTarget := fs.String("repo", ".", "Git repo target to index for codebase awareness: any host URL (https/ssh/git/file://, scp-like git@host:path), owner/repo or host/owner/repo shorthand, or a local path")
 	repoRef := fs.String("repo-ref", "", "Branch or tag to shallow-clone for -repo (empty = remote default branch)")
 	repoUser := fs.String("repo-user", "", "HTTPS username for private -repo clones (default: x-access-token, or VIGILANTE_GIT_USER)")
@@ -151,6 +158,32 @@ func run(args []string, out io.Writer) error {
 		}
 	}
 
+	var alertStore *alert.Store
+	if *alertFile != "" || *alertDeliver != "" {
+		path := *alertFile
+		if path == "" {
+			path = filepath.Join(os.TempDir(), "vigilante-alerts.jsonl")
+		}
+		store, err := alert.Open(alert.Options{
+			Path:          path,
+			MaxBytes:      *alertMaxBytes,
+			KeepFiles:     *alertKeep,
+			MinSeverity:   alert.Severity(*alertMinSev),
+			DeliverURL:    *alertDeliver,
+			PlannerURL:    *plannerURL,
+			InternalToken: *plannerToken,
+			OnError: func(err error) {
+				fmt.Fprintln(out, "[vigilante] alert error:", err)
+			},
+		})
+		if err != nil {
+			return err
+		}
+		alertStore = store
+		defer store.Close()
+		fmt.Fprintf(out, "[vigilante] alert store active: %s (deliver: %s)\n", path, orDash(*alertDeliver))
+	}
+
 	var gw *agent.Gateway
 	if *supervisedAgent {
 		fmt.Fprintln(out, "[vigilante] starting out-of-process supervised agent via github.com/webong/ext/res/system/supervisor...")
@@ -174,6 +207,23 @@ func run(args []string, out io.Writer) error {
 		FallbackPID: os.Getpid(),
 		OnVerdict: func(env agent.EnrichedEnvelope, v agent.Verdict) {
 			printVerdict(out, env, v)
+			// Persist/deliver the alert (Vigilante-owned; through the Gateway
+			// Planner when one is configured).
+			if alertStore != nil {
+				alertStore.Record(alert.Record{
+					Timestamp:  time.Now().UTC(),
+					FlowID:     v.FlowID,
+					Severity:   alert.Severity(v.Severity),
+					Action:     v.Action,
+					Summary:    v.Summary,
+					Method:     env.Event.Method,
+					Path:       env.Event.Path,
+					SrcAddr:    env.Event.SrcAddr,
+					TargetAddr: env.Event.TargetAddr,
+					Handler:    v.MatchedHandler,
+					Advisories: v.MatchedAdvisories,
+				})
+			}
 			// Enforce agent-recommended blocks through the pluggable enforcer.
 			if v.Action == "recommend-block" && enforcer != nil {
 				if ip := net.ParseIP(env.Event.SrcAddr); ip != nil {
@@ -205,7 +255,7 @@ func run(args []string, out io.Writer) error {
 	case "middleware":
 		return runMiddlewareMode(ctx, out, corr, *listenAddr, *targetAddr, *queueSize, *tlsCert, *tlsKey, polGate)
 	case "spinner":
-		return runSpinnerMode(ctx, out, corr, *listenAddr, *targetAddr, *plannerURL, *plannerToken, *tlsCert, *tlsKey, *queueSize, polGate)
+		return runSpinnerMode(ctx, out, corr, *listenAddr, *targetAddr, *plannerURL, *plannerToken, *tlsCert, *tlsKey, *queueSize, polGate, alertStore)
 	default:
 		return fmt.Errorf("unsupported mode %q (choose demo, http, tcp, middleware, spinner, or agent-worker)", *mode)
 	}
@@ -256,7 +306,7 @@ func runMiddlewareMode(ctx context.Context, out io.Writer, corr *correlator.Corr
 // runSpinnerMode runs Vigilante as the relay observation point for a
 // webong/gateway Spinner-style ingress: Spinner owns the public listener and
 // forwarding; Vigilante mirrors every proxied request and triages it.
-func runSpinnerMode(ctx context.Context, out io.Writer, corr *correlator.Correlator, listenAddr, targetRaw, plannerURL, plannerToken, tlsCert, tlsKey string, queueSize int, gate tap.PolicyGate) error {
+func runSpinnerMode(ctx context.Context, out io.Writer, corr *correlator.Correlator, listenAddr, targetRaw, plannerURL, plannerToken, tlsCert, tlsKey string, queueSize int, gate tap.PolicyGate, alertStore *alert.Store) error {
 	srv, err := gateway.NewServer(gateway.Options{
 		ListenAddr:    listenAddr,
 		TargetURL:     targetRaw,
@@ -270,6 +320,13 @@ func runSpinnerMode(ctx context.Context, out io.Writer, corr *correlator.Correla
 	})
 	if err != nil {
 		return err
+	}
+	if alertStore != nil {
+		srv.SetExtraMetrics(func(w http.ResponseWriter) {
+			stored, delivered, failed := alertStore.Stats()
+			fmt.Fprintf(w, "vigilante_alerts_stored_total %d\nvigilante_alerts_delivered_total %d\nvigilante_alerts_failed_total %d\n",
+				stored, delivered, failed)
+		})
 	}
 
 	go func() {

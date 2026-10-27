@@ -9,6 +9,7 @@ As packets and requests enter a system, Vigilante non-blockingly copies them int
 | Layer | Package | Responsibility |
 | --- | --- | --- |
 | **Hot-Path Network Tap** | `internal/tap` | Non-blocking HTTP reverse-proxy / middleware and TCP stream tee (`MirrorQueue`). Drops mirrored copies on backpressure so primary upstream traffic never stalls. Redacts sensitive auth/cookie headers before agent dispatch. Exposes `tap.NewMirror` / `tap.PreviewRequest` for in-process embedding and external ingress adapters. |
+| **Alert Store & Delivery** | `internal/alert` | Append-only JSONL verdict store with size-based rotation and severity filtering; pluggable delivery — direct webhook POST or via a webong/gateway Planner (`/vigilante/alerts`) so subscriber relays own fan-out/retries. Failures are counted, never block the hot path. |
 | **Policy & Block Enforcement** | `internal/policy` + `internal/block` | Declarative allow/deny/block rules (path globs, hosts, methods, CIDRs) evaluated before forwarding; `block` verdicts enforced via a pluggable backend — dry-run `log`, `iptables`, or `nft` — with loopback/unspecified guards and idempotent chain provisioning. |
 | **webong/gateway Spinner Adapter** | `internal/gateway` | Runs Vigilante as the relay observation point for a [webong/gateway](https://github.com/webong/gateway) Spinner-style ingress: public listener with optional TLS, upstream forwarding, optional Planner route decisions (fail-open), and Spinner-parity `/health`, `/ready`, `/metrics` endpoints. Mirrors Spinner's config surface without importing its separate Go module. |
 | **OS, Process & Socket Discovery** | `github.com/webong/ext/res/system` | Inventories host shells, filesystems, and running processes (`ScanHost`, `ScanProcesses`, `InspectProcess`) to map ports/sockets to PIDs, executable paths, open sockets, and memory-mapped shared libraries. |
@@ -148,7 +149,36 @@ requests are allowed (deny is opt-in). Agent verdicts with
 `action: recommend-block` are also fed to the enforcer. Loopback and
 unspecified addresses are never blocked.
 
-### 8. Run Tests
+### 8. Persist & Deliver Alerts
+Vigilante owns alerting: every agent verdict is appended to a rotating JSONL
+store and (optionally) POSTed as JSON to a webhook — directly, or through a
+webong/gateway Planner so Gateway's subscriber relays handle fan-out, retries,
+and queuing. Delivery failures are counted, never block the hot path.
+
+```sh
+# Store only:
+go run ./cmd/vigilante -mode demo -repo . -alert-file /var/log/vigilante/alerts.jsonl
+
+# Store + direct webhook (e.g. Slack incoming webhook, SIEM collector):
+go run ./cmd/vigilante -mode http -listen :8080 -target http://127.0.0.1:3000 \
+  -alert-file /var/log/vigilante/alerts.jsonl \
+  -alert-deliver-url https://hooks.example.com/vigilante \
+  -alert-min-severity high
+
+# Deliver through a Gateway Planner (fan-out via subscriber relays):
+go run ./cmd/vigilante -mode spinner -listen :8080 -target http://127.0.0.1:3000 \
+  -planner-url http://127.0.0.1:8081 -planner-token "$TOKEN" \
+  -alert-file /var/log/vigilante/alerts.jsonl \
+  -alert-deliver-url https://unused.example
+  # -> alerts POST to <planner-url>/vigilante/alerts with the internal token
+```
+
+Flags: `-alert-file`, `-alert-deliver-url`, `-alert-min-severity`
+(`info|low|medium|high|critical`), `-alert-max-bytes` (rotation, default 10 MiB),
+`-alert-keep` (rotated files retained, default 3). When `-mode spinner` runs
+with a store, `/metrics` also exposes `vigilante_alerts_{stored,delivered,failed}_total`.
+
+### 9. Run Tests
 ```sh
 go test -race -v ./...
 ```
