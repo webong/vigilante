@@ -64,6 +64,7 @@ func run(args []string, out io.Writer) error {
 	alertDeliver := fs.String("alert-deliver-url", "", "Webhook URL to POST alerts to (direct when no planner is configured)")
 	alertMaxBytes := fs.Int64("alert-max-bytes", 10<<20, "Rotate the alert file after this many bytes")
 	alertKeep := fs.Int("alert-keep", 3, "Number of rotated alert files to retain")
+	sampleRate := fs.Float64("sample-rate", 1.0, "Fraction [0,1] of mirrored flows dispatched to the agent (<=0 or 1 = all); sampling never affects primary traffic")
 	repoTarget := fs.String("repo", ".", "Git repo target to index for codebase awareness: any host URL (https/ssh/git/file://, scp-like git@host:path), owner/repo or host/owner/repo shorthand, or a local path")
 	repoRef := fs.String("repo-ref", "", "Branch or tag to shallow-clone for -repo (empty = remote default branch)")
 	repoUser := fs.String("repo-user", "", "HTTPS username for private -repo clones (default: x-access-token, or VIGILANTE_GIT_USER)")
@@ -143,6 +144,9 @@ func run(args []string, out io.Writer) error {
 	}
 	if !set["queue-size"] && cfg.QueueSize > 0 {
 		*queueSize = cfg.QueueSize
+	}
+	if !set["sample-rate"] && cfg.SampleRate > 0 {
+		*sampleRate = cfg.SampleRate
 	}
 	if !set["supervised-agent"] && cfg.Supervised {
 		*supervisedAgent = true
@@ -317,15 +321,15 @@ func run(args []string, out io.Writer) error {
 
 	switch *mode {
 	case "demo":
-		return runDemo(ctx, out, corr, store, *supervisedAgent)
+		return runDemo(ctx, out, corr, store, *supervisedAgent, *sampleRate)
 	case "http":
-		return runHTTPProxy(ctx, out, corr, *listenAddr, *targetAddr, *queueSize, *tlsCert, *tlsKey, polGate, alertStore)
+		return runHTTPProxy(ctx, out, corr, *listenAddr, *targetAddr, *queueSize, *tlsCert, *tlsKey, polGate, alertStore, *sampleRate)
 	case "tcp":
 		return runTCPProxy(ctx, out, corr, *listenAddr, *targetAddr, *queueSize)
 	case "middleware":
-		return runMiddlewareMode(ctx, out, corr, *listenAddr, *targetAddr, *queueSize, *tlsCert, *tlsKey, polGate, alertStore)
+		return runMiddlewareMode(ctx, out, corr, *listenAddr, *targetAddr, *queueSize, *tlsCert, *tlsKey, polGate, alertStore, *sampleRate)
 	case "spinner":
-		return runSpinnerMode(ctx, out, corr, *listenAddr, *targetAddr, *plannerURL, *plannerToken, *tlsCert, *tlsKey, *queueSize, polGate, alertStore)
+		return runSpinnerMode(ctx, out, corr, *listenAddr, *targetAddr, *plannerURL, *plannerToken, *tlsCert, *tlsKey, *queueSize, polGate, alertStore, *sampleRate)
 	default:
 		return fmt.Errorf("unsupported mode %q (choose demo, http, tcp, middleware, spinner, or agent-worker)", *mode)
 	}
@@ -335,7 +339,7 @@ func run(args []string, out io.Writer) error {
 // handler seam (tap.NewMirror): it observes every request and forwards to the
 // upstream target, terminating TLS when configured. This is the mode to use
 // when Vigilante runs inside the same process as the application.
-func runMiddlewareMode(ctx context.Context, out io.Writer, corr *correlator.Correlator, listenAddr, targetRaw string, queueSize int, tlsCert, tlsKey string, gate tap.PolicyGate, alertStore *alert.Store) error {
+func runMiddlewareMode(ctx context.Context, out io.Writer, corr *correlator.Correlator, listenAddr, targetRaw string, queueSize int, tlsCert, tlsKey string, gate tap.PolicyGate, alertStore *alert.Store, sampleRate float64) error {
 	if !strings.Contains(targetRaw, "://") {
 		targetRaw = "http://" + targetRaw
 	}
@@ -345,6 +349,7 @@ func runMiddlewareMode(ctx context.Context, out io.Writer, corr *correlator.Corr
 	}
 
 	queue := tap.NewMirrorQueue(queueSize)
+	queue.SetSampleRate(sampleRate)
 	queue.Drain(ctx, 2, func(ctx context.Context, ev agent.PacketEvent) {
 		_, _ = corr.ProcessPacket(ctx, ev)
 	})
@@ -378,7 +383,7 @@ func runMiddlewareMode(ctx context.Context, out io.Writer, corr *correlator.Corr
 // runSpinnerMode runs Vigilante as the relay observation point for a
 // webong/gateway Spinner-style ingress: Spinner owns the public listener and
 // forwarding; Vigilante mirrors every proxied request and triages it.
-func runSpinnerMode(ctx context.Context, out io.Writer, corr *correlator.Correlator, listenAddr, targetRaw, plannerURL, plannerToken, tlsCert, tlsKey string, queueSize int, gate tap.PolicyGate, alertStore *alert.Store) error {
+func runSpinnerMode(ctx context.Context, out io.Writer, corr *correlator.Correlator, listenAddr, targetRaw, plannerURL, plannerToken, tlsCert, tlsKey string, queueSize int, gate tap.PolicyGate, alertStore *alert.Store, sampleRate float64) error {
 	srv, err := gateway.NewServer(gateway.Options{
 		ListenAddr:    listenAddr,
 		TargetURL:     targetRaw,
@@ -393,6 +398,7 @@ func runSpinnerMode(ctx context.Context, out io.Writer, corr *correlator.Correla
 	if err != nil {
 		return err
 	}
+	srv.Queue().SetSampleRate(sampleRate)
 	if alertStore != nil {
 		srv.SetExtraMetrics(func(w http.ResponseWriter) {
 			stored, delivered, failed := alertStore.Stats()
@@ -448,7 +454,7 @@ func orDash(s string) string {
 	return s
 }
 
-func runDemo(ctx context.Context, out io.Writer, corr *correlator.Correlator, store graph.Store, supervised bool) error {
+func runDemo(ctx context.Context, out io.Writer, corr *correlator.Correlator, store graph.Store, supervised bool, sampleRate float64) error {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/api/v1/health", func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
@@ -472,6 +478,7 @@ func runDemo(ctx context.Context, out io.Writer, corr *correlator.Correlator, st
 	}
 
 	queue := tap.NewMirrorQueue(64)
+	queue.SetSampleRate(sampleRate)
 	middlewareServer := httptest.NewServer(tap.NewHTTPReverseProxyTap(upstreamURL, queue, "127.0.0.1:0"))
 	defer middlewareServer.Close()
 
@@ -547,7 +554,7 @@ func runDemo(ctx context.Context, out io.Writer, corr *correlator.Correlator, st
 	return nil
 }
 
-func runHTTPProxy(ctx context.Context, out io.Writer, corr *correlator.Correlator, listenAddr, targetRaw string, queueSize int, tlsCert, tlsKey string, gate tap.PolicyGate, alertStore *alert.Store) error {
+func runHTTPProxy(ctx context.Context, out io.Writer, corr *correlator.Correlator, listenAddr, targetRaw string, queueSize int, tlsCert, tlsKey string, gate tap.PolicyGate, alertStore *alert.Store, sampleRate float64) error {
 	if !strings.Contains(targetRaw, "://") {
 		targetRaw = "http://" + targetRaw
 	}
@@ -557,6 +564,7 @@ func runHTTPProxy(ctx context.Context, out io.Writer, corr *correlator.Correlato
 	}
 
 	queue := tap.NewMirrorQueue(queueSize)
+	queue.SetSampleRate(sampleRate)
 	queue.Drain(ctx, 2, func(ctx context.Context, ev agent.PacketEvent) {
 		_, _ = corr.ProcessPacket(ctx, ev)
 	})

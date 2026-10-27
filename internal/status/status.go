@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net/http"
 
+	"github.com/webong/vigilante/internal/redact"
 	"github.com/webong/vigilante/internal/tap"
 )
 
@@ -32,10 +33,13 @@ func Handler(queue *tap.MirrorQueue, alert AlertStats) http.Handler {
 	})
 	mux.HandleFunc("/metrics", func(w http.ResponseWriter, _ *http.Request) {
 		var queued, dropped uint64
+		var sampledOut uint64
 		if queue != nil {
 			queued, dropped = queue.Stats()
+			sampledOut = queue.SampledOut()
 		}
-		fmt.Fprintf(w, "vigilante_queue_enqueued_total %d\nvigilante_queue_dropped_total %d\n", queued, dropped)
+		fmt.Fprintf(w, "vigilante_queue_enqueued_total %d\nvigilante_queue_dropped_total %d\nvigilante_queue_sampled_out_total %d\nvigilante_redact_hits_total %d\n",
+			queued, dropped, sampledOut, redact.Hits())
 		if alert != nil {
 			stored, delivered, failed := alert()
 			fmt.Fprintf(w, "vigilante_alerts_stored_total %d\nvigilante_alerts_delivered_total %d\nvigilante_alerts_failed_total %d\n",

@@ -14,26 +14,27 @@ import (
 // same minimal YAML subset used by the policy parser is accepted. CLI flags
 // always win over config values.
 type Config struct {
-	Mode         string `json:"mode" yaml:"mode"`
-	Listen       string `json:"listen" yaml:"listen"`
-	Target       string `json:"target" yaml:"target"`
-	Repo         string `json:"repo" yaml:"repo"`
-	RepoRef      string `json:"repo_ref" yaml:"repo_ref"`
-	RepoUser     string `json:"repo_user" yaml:"repo_user"`
-	RepoToken    string `json:"repo_token" yaml:"repo_token"`
-	RepoSSHKey   string `json:"repo_ssh_key" yaml:"repo_ssh_key"`
-	TLSCert      string `json:"tls_cert" yaml:"tls_cert"`
-	TLSKey       string `json:"tls_key" yaml:"tls_key"`
-	PlannerURL   string `json:"planner_url" yaml:"planner_url"`
-	PlannerToken string `json:"planner_token" yaml:"planner_token"`
-	Policy       string `json:"policy" yaml:"policy"`
-	BlockMode    string `json:"block_mode" yaml:"block_mode"`
-	BlockChain   string `json:"block_chain" yaml:"block_chain"`
-	AlertFile    string `json:"alert_file" yaml:"alert_file"`
-	AlertDeliver string `json:"alert_deliver_url" yaml:"alert_deliver_url"`
-	AlertMinSev  string `json:"alert_min_severity" yaml:"alert_min_severity"`
-	QueueSize    int    `json:"queue_size" yaml:"queue_size"`
-	Supervised   bool   `json:"supervised_agent" yaml:"supervised_agent"`
+	Mode         string  `json:"mode" yaml:"mode"`
+	Listen       string  `json:"listen" yaml:"listen"`
+	Target       string  `json:"target" yaml:"target"`
+	Repo         string  `json:"repo" yaml:"repo"`
+	RepoRef      string  `json:"repo_ref" yaml:"repo_ref"`
+	RepoUser     string  `json:"repo_user" yaml:"repo_user"`
+	RepoToken    string  `json:"repo_token" yaml:"repo_token"`
+	RepoSSHKey   string  `json:"repo_ssh_key" yaml:"repo_ssh_key"`
+	TLSCert      string  `json:"tls_cert" yaml:"tls_cert"`
+	TLSKey       string  `json:"tls_key" yaml:"tls_key"`
+	PlannerURL   string  `json:"planner_url" yaml:"planner_url"`
+	PlannerToken string  `json:"planner_token" yaml:"planner_token"`
+	Policy       string  `json:"policy" yaml:"policy"`
+	BlockMode    string  `json:"block_mode" yaml:"block_mode"`
+	BlockChain   string  `json:"block_chain" yaml:"block_chain"`
+	AlertFile    string  `json:"alert_file" yaml:"alert_file"`
+	AlertDeliver string  `json:"alert_deliver_url" yaml:"alert_deliver_url"`
+	AlertMinSev  string  `json:"alert_min_severity" yaml:"alert_min_severity"`
+	QueueSize    int     `json:"queue_size" yaml:"queue_size"`
+	SampleRate   float64 `json:"sample_rate" yaml:"sample_rate"`
+	Supervised   bool    `json:"supervised_agent" yaml:"supervised_agent"`
 }
 
 // loadConfig reads a JSON or YAML config file; missing file with an empty
@@ -120,6 +121,12 @@ func decodeSimpleYAML(data []byte) (Config, error) {
 				return Config{}, fmt.Errorf("config: queue_size: %w", err)
 			}
 			c.QueueSize = n
+		case "sample_rate":
+			fl, err := strconv.ParseFloat(val, 64)
+			if err != nil {
+				return Config{}, fmt.Errorf("config: sample_rate: %w", err)
+			}
+			c.SampleRate = fl
 		case "supervised_agent":
 			b, err := strconv.ParseBool(val)
 			if err != nil {
