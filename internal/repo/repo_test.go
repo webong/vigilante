@@ -116,8 +116,6 @@ func TestBuildSSHCommand(t *testing.T) {
 	}
 }
 
-
-
 func TestOpenLocalDir(t *testing.T) {
 	dir := t.TempDir()
 	src := `package main

@@ -77,13 +77,13 @@ type ServerProcessContext struct {
 // CodebaseContext summarizes the target repository or codebase pointed to by
 // vigilante (-repo), including the matched route handler and relevant code sinks.
 type CodebaseContext struct {
-	Source       string             `json:"source"`
-	Commit       string             `json:"commit,omitempty"`
-	TreeDigest   string             `json:"tree_digest"`
-	FileCount    int                `json:"file_count"`
-	Languages    []string           `json:"languages,omitempty"`
-	MatchedRoute *repo.RouteHandler `json:"matched_route,omitempty"`
-	RelevantSinks []repo.CodeSink   `json:"relevant_sinks,omitempty"`
+	Source        string             `json:"source"`
+	Commit        string             `json:"commit,omitempty"`
+	TreeDigest    string             `json:"tree_digest"`
+	FileCount     int                `json:"file_count"`
+	Languages     []string           `json:"languages,omitempty"`
+	MatchedRoute  *repo.RouteHandler `json:"matched_route,omitempty"`
+	RelevantSinks []repo.CodeSink    `json:"relevant_sinks,omitempty"`
 }
 
 // EnrichedEnvelope bundles the mirrored packet with the live OS, Server,

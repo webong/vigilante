@@ -17,11 +17,11 @@ import (
 
 // Advisory describes a known vulnerability matched against a loaded dependency.
 type Advisory struct {
-	ID          string `json:"id"`           // e.g. "CVE-2024-24790" or "GHSA-..."
-	Package     string `json:"package"`      // Module or package name
-	Version     string `json:"version"`      // Loaded version
-	FixedIn     string `json:"fixed_in"`     // Recommended fixed version
-	Severity    string `json:"severity"`     // "low", "medium", "high", "critical"
+	ID          string `json:"id"`       // e.g. "CVE-2024-24790" or "GHSA-..."
+	Package     string `json:"package"`  // Module or package name
+	Version     string `json:"version"`  // Loaded version
+	FixedIn     string `json:"fixed_in"` // Recommended fixed version
+	Severity    string `json:"severity"` // "low", "medium", "high", "critical"
 	Description string `json:"description"`
 }
 
@@ -316,8 +316,8 @@ func parsePackageLockJSON(path string) []Module {
 		return nil
 	}
 	var lock struct {
-		Name         string `json:"name"`
-		Packages     map[string]struct {
+		Name     string `json:"name"`
+		Packages map[string]struct {
 			Version string `json:"version"`
 		} `json:"packages"`
 		Dependencies map[string]struct {

@@ -53,14 +53,14 @@ type CodeSink struct {
 
 // Snapshot summarizes the indexed codebase for the agent.
 type Snapshot struct {
-	Source      string         `json:"source"`       // Original URL or path passed to -repo
-	LocalRoot   string         `json:"local_root"`   // Local filesystem checkout path
-	Commit      string         `json:"commit,omitempty"`
-	TreeDigest  string         `json:"tree_digest"`  // Deterministic SHA-256 over indexed files
-	FileCount   int            `json:"file_count"`
-	Languages   []string       `json:"languages,omitempty"`
-	Routes      []RouteHandler `json:"routes,omitempty"`
-	Sinks       []CodeSink     `json:"sinks,omitempty"`
+	Source     string         `json:"source"`     // Original URL or path passed to -repo
+	LocalRoot  string         `json:"local_root"` // Local filesystem checkout path
+	Commit     string         `json:"commit,omitempty"`
+	TreeDigest string         `json:"tree_digest"` // Deterministic SHA-256 over indexed files
+	FileCount  int            `json:"file_count"`
+	Languages  []string       `json:"languages,omitempty"`
+	Routes     []RouteHandler `json:"routes,omitempty"`
+	Sinks      []CodeSink     `json:"sinks,omitempty"`
 }
 
 // Index holds the indexed codebase and allows safe, root-jailed source reading.
