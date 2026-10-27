@@ -1,0 +1,18 @@
+# Binaries and build artifacts
+/vigilante
+*.exe
+*.dll
+*.so
+*.dylib
+
+# Test and coverage artifacts
+*.test
+*.out
+coverage.txt
+
+# Runtime graph snapshots
+*.graph.json
+vigilante-graph.json
+
+# OS metadata
+.DS_Store
