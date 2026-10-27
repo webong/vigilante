@@ -11,17 +11,35 @@ As packets and requests enter a system, Vigilante non-blockingly copies them int
 | **Hot-Path Network Tap** | `internal/tap` | Non-blocking HTTP reverse-proxy / middleware and TCP stream tee (`MirrorQueue`). Drops mirrored copies on backpressure so primary upstream traffic never stalls. Redacts sensitive auth/cookie headers before agent dispatch. |
 | **OS, Process & Socket Discovery** | `github.com/webong/ext/res/system` | Inventories host shells, filesystems, and running processes (`ScanHost`, `ScanProcesses`, `InspectProcess`) to map ports/sockets to PIDs, executable paths, open sockets, and memory-mapped shared libraries. |
 | **Network Topology** | `github.com/webong/ext/res/system/network` | Zero-traffic observation of local interfaces, assigned IP addresses, route tables, and DNS resolver settings (`network.Discover`). |
-| **Application Dependency Graph** | `internal/deps` | Extracts module dependency graphs from compiled Go binaries (`debug/buildinfo`), `go.mod`, `package.json`, and `res/system` shared library mappings. |
-| **Transactional System Graph** | `internal/schema` + `res/system/graph` | Registers the `vigilante.net` schema alongside `ext.system` in the same `graph.Store`, linking `listener -> flow -> process-ref -> dependency` and `flow -> agent-alert`. |
-| **Agent Gateway** | `internal/agent` + `pkg/ext-go/engine` | Typed `ext.plugin/v1` contract (`vigilante.agent@v1` / `triage-flow`) using `engine/guest/author` and `engine.Session`. Supports in-process guests, `jsonline` subprocesses, or `res/system/supervisor`-managed agents. |
+| **Application Dependency Graph** | `internal/deps` | Extracts module dependency graphs from compiled Go binaries (`debug/buildinfo`), `go.mod`, `go.sum`, `package.json`, `package-lock.json`, `Cargo.lock`, `uv.lock`, `requirements.txt`, and `res/system` shared library mappings, plus CVE advisory matching. |
+| **Codebase & Git Repo Indexer** | `internal/repo` | Clones or opens **any** Git repository — GitHub, GitLab, Bitbucket, Gitea, self-hosted — via a full URL (`https://`, `ssh://`, `git://`, `file://`, scp-like `git@host:path`), a `host/owner/repo` or `owner/repo` shorthand (`VIGILANTE_GIT_HOST` selects the default host), or a local directory (`-repo`). **Private repos** authenticate with an HTTPS token (`-repo-token` / `VIGILANTE_GIT_TOKEN`, handed to git via a private `GIT_ASKPASS` helper — never argv or `.git/config`), a specific SSH key (`-repo-ssh-key` / `VIGILANTE_GIT_SSH_KEY`), an ssh-agent, or a configured git credential helper. Computes its file tree digest, discovers HTTP/RPC route handlers and security-sensitive code sinks (`filesystem`, `sql`, `exec`), and serves root-jailed source snippets to the agent over `ext.plugin/v1` reverse calls (`vigilante.host@v1/read-source`). |
+| **Transactional System Graph** | `internal/schema` + `res/system/graph` | Registers the `vigilante.net` schema alongside `ext.system` in the same `graph.Store`, linking `listener -> flow -> process-ref -> codebase -> route-handler`, `process-ref -> dependency`, and `flow -> agent-alert`. |
+| **Agent Gateway** | `internal/agent` + `pkg/ext-go/engine` | Typed `ext.plugin/v1` contract (`vigilante.agent@v1` / `triage-flow`) using `engine/guest/author` and `engine.Session`. Supports in-process guests, `jsonline` subprocesses, and `res/system/supervisor`-managed agents with bidirectional reverse host callbacks (`query-graph` and `read-source`). |
 
 ## Quick Start
 
 ### 1. Run the Self-Contained End-to-End Demo
-Spins up a local upstream server, places the Vigilante tap middleware in front of it, runs a live `ext/res/system` host/process/network scan, fires sample requests (normal, path traversal, and SQL injection), and outputs the agent's context-enriched verdicts:
+Spins up a local upstream server, places the Vigilante tap middleware in front of it, indexes the repository codebase, runs a live `ext/res/system` host/process/network scan, fires sample requests (normal, path traversal, and SQL injection), and outputs the agent's context-enriched verdicts (including the exact `file:line` route handler and source code snippet fetched by the agent):
 
 ```sh
-go run ./cmd/vigilante -mode demo
+# In-process ext.plugin/v1 agent:
+go run ./cmd/vigilante -mode demo -repo .
+
+# Out-of-process agent supervised by ext/res/system/supervisor over jsonline IPC:
+go run ./cmd/vigilante -mode demo -repo . -supervised-agent
+
+# Pointing at a remote repository on any Git host (shallow-cloned and indexed automatically):
+go run ./cmd/vigilante -mode http -listen 127.0.0.1:8080 -target http://127.0.0.1:3000 -repo https://github.com/webong/ext
+go run ./cmd/vigilante -mode http -listen 127.0.0.1:8080 -target http://127.0.0.1:3000 -repo git@gitlab.internal:platform/api.git
+
+# Private repositories — HTTPS token (never placed in argv or .git/config):
+VIGILANTE_GIT_TOKEN=ghp_xxx go run ./cmd/vigilante -mode demo -repo https://github.com/webong/vigilante
+
+# Private repositories — a specific SSH key (works without ssh-agent, accepts new host keys non-interactively):
+go run ./cmd/vigilante -mode demo -repo git@gitlab.internal:platform/api.git -repo-ssh-key /etc/ssh/vigilante_ed25519
+
+# Other flags: -repo-ref <branch|tag>, -repo-user <https-user>, -repo-token <token>, -repo-ssh-key <path>
+# Env fallbacks: VIGILANTE_GIT_HOST, VIGILANTE_GIT_USER, VIGILANTE_GIT_TOKEN, VIGILANTE_GIT_SSH_KEY
 ```
 
 ### 2. Run as an HTTP Reverse-Proxy Tap
