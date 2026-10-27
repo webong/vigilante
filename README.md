@@ -9,6 +9,7 @@ As packets and requests enter a system, Vigilante non-blockingly copies them int
 | Layer | Package | Responsibility |
 | --- | --- | --- |
 | **Hot-Path Network Tap** | `internal/tap` | Non-blocking HTTP reverse-proxy / middleware and TCP stream tee (`MirrorQueue`). Drops mirrored copies on backpressure so primary upstream traffic never stalls. Redacts sensitive auth/cookie headers before agent dispatch. Exposes `tap.NewMirror` / `tap.PreviewRequest` for in-process embedding and external ingress adapters. |
+| **Status Endpoints** | `internal/status` | Shared `/healthz`, `/health`, `/ready`, and `/metrics` (queue + alert counters) mounted on every HTTP-serving mode. |
 | **Alert Store & Delivery** | `internal/alert` | Append-only JSONL verdict store with size-based rotation and severity filtering; pluggable delivery — direct webhook POST or via a webong/gateway Planner (`/vigilante/alerts`) so subscriber relays own fan-out/retries. Failures are counted, never block the hot path. |
 | **Policy & Block Enforcement** | `internal/policy` + `internal/block` | Declarative allow/deny/block rules (path globs, hosts, methods, CIDRs) evaluated before forwarding; `block` verdicts enforced via a pluggable backend — dry-run `log`, `iptables`, or `nft` — with loopback/unspecified guards and idempotent chain provisioning. |
 | **webong/gateway Spinner Adapter** | `internal/gateway` | Runs Vigilante as the relay observation point for a [webong/gateway](https://github.com/webong/gateway) Spinner-style ingress: public listener with optional TLS, upstream forwarding, optional Planner route decisions (fail-open), and Spinner-parity `/health`, `/ready`, `/metrics` endpoints. Mirrors Spinner's config surface without importing its separate Go module. |
@@ -178,7 +179,42 @@ Flags: `-alert-file`, `-alert-deliver-url`, `-alert-min-severity`
 `-alert-keep` (rotated files retained, default 3). When `-mode spinner` runs
 with a store, `/metrics` also exposes `vigilante_alerts_{stored,delivered,failed}_total`.
 
-### 9. Run Tests
+### 9. Config File
+For systemd/containers, put defaults in a config file and override per-deployment
+via CLI flags (flags always win):
+
+```json
+// vigilante.json
+{
+  "mode": "http",
+  "listen": ":8080",
+  "target": "http://127.0.0.1:3000",
+  "repo": "https://github.com/owner/app",
+  "policy": "/etc/vigilante/policy.yaml",
+  "block_mode": "log",
+  "alert_file": "/var/log/vigilante/alerts.jsonl",
+  "alert_min_severity": "high",
+  "alert_deliver_url": "https://hooks.example.com/vigilante",
+  "queue_size": 1024
+}
+```
+
+```sh
+go run ./cmd/vigilante -config vigilante.json
+go run ./cmd/vigilante -config vigilante.json -listen :9443 -tls-cert cert.pem -tls-key key.pem  # override
+```
+
+Flat YAML (`key: value` lines) is also accepted; lists/objects belong in JSON.
+Unknown keys are rejected to catch typos early.
+
+### 10. Health & Metrics (all modes)
+Every HTTP-serving mode (`http`, `middleware`, `spinner`) exposes:
+- `GET /healthz` (alias `/health`) → `ok`
+- `GET /ready` → `ready`
+- `GET /metrics` → `vigilante_queue_{enqueued,dropped}_total`,
+  `vigilante_alerts_{stored,delivered,failed}_total` (when an alert store is on)
+
+### 11. Run Tests
 ```sh
 go test -race -v ./...
 ```
