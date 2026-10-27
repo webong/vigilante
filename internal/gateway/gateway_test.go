@@ -69,7 +69,7 @@ func TestServerForwardsAndObserves(t *testing.T) {
 		t.Fatalf("forwarded response = %q", out)
 	}
 
-	// Health/metrics endpoints (Spinner parity) must not be forwarded.
+	// Health/metrics endpoints must not be forwarded.
 	health, err := http.Get(base + "/health")
 	if err != nil {
 		t.Fatal(err)
@@ -101,6 +101,73 @@ func TestServerForwardsAndObserves(t *testing.T) {
 	}
 	if ev.PayloadPreview != "hello" {
 		t.Fatalf("payload preview = %q", ev.PayloadPreview)
+	}
+}
+
+func TestParseMode(t *testing.T) {
+	for in, want := range map[string]Mode{
+		"":          ModeLocal,
+		"local":     ModeLocal,
+		"embedded":  ModeLocal, // legacy alias
+		"Local ":    ModeLocal,
+		"external":  ModeExternal,
+		"companion": ModeExternal, // legacy alias
+	} {
+		got, err := ParseMode(in)
+		if err != nil || got != want {
+			t.Errorf("ParseMode(%q) = %v/%v, want %v", in, got, err, want)
+		}
+	}
+	if _, err := ParseMode("bogus"); err == nil {
+		t.Error("expected error for unknown mode")
+	}
+}
+
+func TestExternalModeForwardsToExistingIngress(t *testing.T) {
+	// Stand-in for an already-running ingress/gateway process.
+	existing := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprintf(w, "existing-gateway:%s", r.URL.Path)
+	}))
+	defer existing.Close()
+
+	srv, err := NewServer(Options{
+		Mode:        ModeExternal,
+		ExternalURL: existing.URL,
+		// ListenAddr/TargetURL intentionally empty: external owns no listener.
+	}, nil)
+	if err != nil {
+		t.Fatalf("NewServer external: %v", err)
+	}
+	if srv.Mode() != ModeExternal {
+		t.Fatalf("Mode() = %v", srv.Mode())
+	}
+
+	ln, err := newLocalListener()
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv.httpSrv.Addr = ln.Addr().String()
+	go func() { _ = srv.httpSrv.Serve(ln) }()
+	defer func() {
+		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+		defer cancel()
+		_ = srv.Shutdown(ctx)
+	}()
+
+	resp, err := http.Get("http://" + ln.Addr().String() + "/hook")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	out, _ := io.ReadAll(resp.Body)
+	if string(out) != "existing-gateway:/hook" {
+		t.Fatalf("external forwarded to = %q, want the existing ingress", out)
+	}
+}
+
+func TestExternalModeRequiresEndpoint(t *testing.T) {
+	if _, err := NewServer(Options{Mode: ModeExternal}, nil); err == nil {
+		t.Fatal("expected error with no external endpoint or target")
 	}
 }
 

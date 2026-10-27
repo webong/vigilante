@@ -13,7 +13,7 @@ As packets and requests enter a system, Vigilante non-blockingly copies them int
 | **Status Endpoints** | `internal/status` | Shared `/healthz`, `/health`, `/ready`, and `/metrics` (queue + alert counters) mounted on every HTTP-serving mode. |
 | **Alert Store & Delivery** | `internal/alert` | Append-only JSONL verdict store with size-based rotation and severity filtering; pluggable delivery — direct webhook POST or via a webong/gateway Planner (`/vigilante/alerts`) so subscriber relays own fan-out/retries. Failures are counted, never block the hot path. |
 | **Policy & Block Enforcement** | `internal/policy` + `internal/block` | Declarative allow/deny/block rules (path globs, hosts, methods, CIDRs) evaluated before forwarding; `block` verdicts enforced via a pluggable backend — dry-run `log`, `iptables`, or `nft` — with loopback/unspecified guards and idempotent chain provisioning. |
-| **webong/gateway Spinner Adapter** | `internal/gateway` | Runs Vigilante as the relay observation point for a [webong/gateway](https://github.com/webong/gateway) Spinner-style ingress: public listener with optional TLS, upstream forwarding, optional Planner route decisions (fail-open), and Spinner-parity `/health`, `/ready`, `/metrics` endpoints. Mirrors Spinner's config surface without importing its separate Go module. |
+| **Gateway Ingress Layer** | `internal/gateway` | Vigilante's vendor-neutral ingress. Two postures: **local** (Vigilante owns the public listener, optional TLS, upstream forwarding, optional route-planner decisions, fail-open, `/health`, `/ready`, `/metrics`) and **external:&lt;url&gt;** (attach to an ingress running elsewhere — that peer keeps the listener, Vigilante mirrors its traffic). Does not depend on any specific gateway product. |
 | **OS, Process & Socket Discovery** | `github.com/webong/ext/res/system` | Inventories host shells, filesystems, and running processes (`ScanHost`, `ScanProcesses`, `InspectProcess`) to map ports/sockets to PIDs, executable paths, open sockets, and memory-mapped shared libraries. |
 | **Network Topology** | `github.com/webong/ext/res/system/network` | Zero-traffic observation of local interfaces, assigned IP addresses, route tables, and DNS resolver settings (`network.Discover`). |
 | **Application Dependency Graph** | `internal/deps` | Extracts module dependency graphs from compiled Go binaries (`debug/buildinfo`), `go.mod`, `go.sum`, `package.json`, `package-lock.json`, `Cargo.lock`, `uv.lock`, `requirements.txt`, and `res/system` shared library mappings, plus CVE advisory matching. |
@@ -64,7 +64,7 @@ go run ./cmd/vigilante \
   -target 127.0.0.1:5432
 ```
 
-### 4. Terminate TLS on the Tap (http / spinner modes)
+### 4. Terminate TLS on the Tap (http / gateway modes)
 ```sh
 go run ./cmd/vigilante \
   -mode http \
@@ -74,26 +74,36 @@ go run ./cmd/vigilante \
   -tls-key  /etc/vigilante/privkey.pem
 ```
 
-### 5. Run Behind / Alongside webong/gateway (Spinner ingress)
-Vigilante can act as the relay observation point for a [webong/gateway](https://github.com/webong/gateway) Spinner-style ingress: Spinner owns the public listener, forwarding, and optional PHP Planner; Vigilante mirrors every proxied request and dispatches enriched flows to its agent.
+### 5. Gateway Ingress (local or external)
+Vigilante's `-mode gateway` runs its own ingress (**local** posture) or attaches
+to an ingress/gateway **already running elsewhere** (**external** posture).
+Vigilante is vendor-neutral — external works with any gateway that speaks plain
+HTTP forwarding.
 
 ```sh
-# Spinner-style ingress with Vigilante as the relay observer (fail-open to the
-# upstream if the Planner is unreachable):
+# local: Vigilante owns the listener + forwarding (optionally consulting a
+# route planner, fail-open if it's unreachable):
 go run ./cmd/vigilante \
-  -mode spinner \
+  -mode gateway \
+  -gateway local \
   -listen :8080 \
   -target http://127.0.0.1:3000 \
   -planner-url http://127.0.0.1:8081 \
   -planner-token "$INTERNAL_TOKEN"
 
-# With TLS termination on the public listener:
-go run ./cmd/vigilante -mode spinner -listen :8443 -target http://127.0.0.1:3000 \
+# external: attach to an ingress already running elsewhere — that process
+# keeps owning the listener/routing; Vigilante observes the traffic it carries
+# (recommended if you already run a gateway):
+go run ./cmd/vigilante -mode gateway -gateway external:http://gw.internal:5001 -repo .
+
+# local with TLS termination on the public listener:
+go run ./cmd/vigilante -mode gateway -gateway local -listen :8443 -target http://127.0.0.1:3000 \
   -tls-cert /etc/vigilante/fullchain.pem -tls-key /etc/vigilante/privkey.pem
 ```
 
-Health endpoints follow Spinner parity: `/health`, `/ready`, and `/metrics`
-(queue enqueued/dropped totals, observed request count).
+`-gateway` also accepts `gateway: external:<url>` from the config file.
+Health endpoints: `/health`, `/ready`, and `/metrics` (queue enqueued/dropped,
+observed request count).
 
 ### 6. Embed the Tap In-Process (middleware mode)
 `-mode middleware` wraps the mirror tap around an existing handler seam — use it
@@ -167,8 +177,8 @@ go run ./cmd/vigilante -mode http -listen :8080 -target http://127.0.0.1:3000 \
   -alert-deliver-url https://hooks.example.com/vigilante \
   -alert-min-severity high
 
-# Deliver through a Gateway Planner (fan-out via subscriber relays):
-go run ./cmd/vigilante -mode spinner -listen :8080 -target http://127.0.0.1:3000 \
+# Deliver through an upstream gateway/route-planner (fan-out via subscriber relays):
+go run ./cmd/vigilante -mode gateway -gateway local -listen :8080 -target http://127.0.0.1:3000 \
   -planner-url http://127.0.0.1:8081 -planner-token "$TOKEN" \
   -alert-file /var/log/vigilante/alerts.jsonl \
   -alert-deliver-url https://unused.example
@@ -177,7 +187,7 @@ go run ./cmd/vigilante -mode spinner -listen :8080 -target http://127.0.0.1:3000
 
 Flags: `-alert-file`, `-alert-deliver-url`, `-alert-min-severity`
 (`info|low|medium|high|critical`), `-alert-max-bytes` (rotation, default 10 MiB),
-`-alert-keep` (rotated files retained, default 3). When `-mode spinner` runs
+`-alert-keep` (rotated files retained, default 3). When `-mode gateway` runs
 with a store, `/metrics` also exposes `vigilante_alerts_{stored,delivered,failed}_total`.
 
 ### 9. Config File
@@ -209,7 +219,7 @@ Flat YAML (`key: value` lines) is also accepted; lists/objects belong in JSON.
 Unknown keys are rejected to catch typos early.
 
 ### 10. Health & Metrics (all modes)
-Every HTTP-serving mode (`http`, `middleware`, `spinner`) exposes:
+Every HTTP-serving mode (`http`, `middleware`, `gateway`) exposes:
 - `GET /healthz` (alias `/health`) → `ok`
 - `GET /ready` → `ready`
 - `GET /metrics` → `vigilante_queue_{enqueued,dropped,sampled_out}_total`,

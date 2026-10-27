@@ -24,7 +24,7 @@ func TestLoadConfigJSON(t *testing.T) {
 
 func TestLoadConfigYAML(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "vig.yaml")
-	data := "# comment\nmode: spinner\nlisten: ':8443'\npolicy: /etc/vig/policy.yaml\nblock_mode: nft\nqueue_size: 128\n"
+	data := "# comment\nmode: gateway\ngateway: external:http://gw:5001\nlisten: ':8443'\npolicy: /etc/vig/policy.yaml\nblock_mode: nft\nqueue_size: 128\n"
 	if err := os.WriteFile(path, []byte(data), 0o644); err != nil {
 		t.Fatal(err)
 	}
@@ -32,8 +32,8 @@ func TestLoadConfigYAML(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if cfg.Mode != "spinner" || cfg.Listen != ":8443" || cfg.Policy != "/etc/vig/policy.yaml" ||
-		cfg.BlockMode != "nft" || cfg.QueueSize != 128 {
+	if cfg.Mode != "gateway" || cfg.Gateway != "external:http://gw:5001" || cfg.Listen != ":8443" ||
+		cfg.Policy != "/etc/vig/policy.yaml" || cfg.BlockMode != "nft" || cfg.QueueSize != 128 {
 		t.Fatalf("cfg = %+v", cfg)
 	}
 }

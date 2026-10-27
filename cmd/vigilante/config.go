@@ -15,6 +15,7 @@ import (
 // always win over config values.
 type Config struct {
 	Mode         string  `json:"mode" yaml:"mode"`
+	Gateway      string  `json:"gateway" yaml:"gateway"` // posture: local | external:<url>
 	Listen       string  `json:"listen" yaml:"listen"`
 	Target       string  `json:"target" yaml:"target"`
 	Repo         string  `json:"repo" yaml:"repo"`
@@ -81,6 +82,8 @@ func decodeSimpleYAML(data []byte) (Config, error) {
 		switch key {
 		case "mode":
 			c.Mode = val
+		case "gateway":
+			c.Gateway = val
 		case "listen":
 			c.Listen = val
 		case "target":

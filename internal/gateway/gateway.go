@@ -1,15 +1,15 @@
-// Package gateway adapts Vigilante's mirror tap to act as the relay handler for
-// an ingress built on github.com/webong/gateway (Spinner). Spinner owns the
-// public listener, forwarding, and (optionally) the PHP Planner; Vigilante
-// observes every proxied request non-blockingly and dispatches enriched flows
-// to its ext.plugin/v1 agent.
+// Package gateway provides Vigilante's ingress layer. It has two postures:
 //
-// The adapter intentionally mirrors Spinner's configuration surface (port,
-// upstream forwarding, TLS, planner endpoint, body limits, worker pool) instead
-// of importing github.com/webong/gateway/pkg/spinner, which is a separate Go
-// module with local replace directives and heavy runtime dependencies
-// (arranger/bridge/automation). Deploy it as a companion process or embed it
-// via the exported handler builders.
+//   - local: Vigilante owns the public listener and forwarding, optionally
+//     consulting an upstream route planner for decisions.
+//   - external: Vigilante attaches to an existing ingress/gateway process at
+//     ExternalURL and mirrors the traffic it carries (the peer keeps owning
+//     the listener and routing).
+//
+// The package is deliberately vendor-neutral: it does not depend on any
+// specific gateway product. Vigilante's mirror tap is the relay observation
+// point in both postures, dispatching enriched flows to its ext.plugin/v1
+// agent.
 package gateway
 
 import (
@@ -27,21 +27,57 @@ import (
 	"github.com/webong/vigilante/internal/tap"
 )
 
-// Options configures a Vigilante-backed Spinner-style ingress.
+// Mode selects how Vigilante's ingress relates to a peer gateway/ingress.
+//
+// Vigilante does not depend on any specific gateway product. It supports two
+// runtime postures: attach to an existing ingress process (external), or run
+// Vigilante's own ingress (local).
+type Mode string
+
+const (
+	// ModeLocal runs Vigilante's own built-in ingress — no external ingress
+	// process required. Vigilante owns the gateway and can consult a route
+	// planner via PlannerURL for decisions.
+	ModeLocal Mode = "local"
+	// ModeExternal attaches to an already-running ingress/gateway process at
+	// ExternalURL: that peer keeps owning the public listener and routing, and
+	// Vigilante's mirror tap observes the traffic flowing through it. This is
+	// the recommended posture when you already run a gateway.
+	ModeExternal Mode = "external"
+)
+
+// ParseMode validates a gateway posture string.
+func ParseMode(s string) (Mode, error) {
+	switch Mode(strings.ToLower(strings.TrimSpace(s))) {
+	case "", ModeLocal, "embedded": // "embedded" accepted as a legacy alias for local
+		return ModeLocal, nil
+	case ModeExternal, "companion": // "companion" accepted as a legacy alias for external
+		return ModeExternal, nil
+	default:
+		return "", fmt.Errorf("gateway: unknown posture %q (local, external:<url>)", s)
+	}
+}
+
+// Options configures Vigilante's ingress.
 type Options struct {
-	// ListenAddr is the public listener, e.g. ":8080".
+	Mode Mode
+	// ListenAddr is the public listener (local mode), e.g. ":8080".
 	ListenAddr string
+	// ExternalURL is the endpoint of an existing ingress/gateway process
+	// (external mode), e.g. "http://gw.internal:5001". Traffic is
+	// observed/forwarded there.
+	ExternalURL string
 	// TargetURL is the upstream origin to forward to, e.g. "http://127.0.0.1:3000".
 	TargetURL string
-	// PlannerURL optionally points at a webong/gateway Planner for route
-	// decisions; when empty, traffic is forwarded straight to TargetURL.
+	// PlannerURL optionally points at an upstream route planner for decisions;
+	// when empty, traffic is forwarded straight to TargetURL.
 	PlannerURL string
-	// InternalToken authenticates requests to the Planner (Spinner parity).
+	// InternalToken authenticates requests to the route planner.
 	InternalToken string
 	// TLSCertFile / TLSKeyFile enable HTTPS on the public listener.
 	TLSCertFile string
 	TLSKeyFile  string
-	// MaxBodyBytes caps the mirrored body preview (Spinner MaxBodySize parity).
+	// MaxBodyBytes caps the mirrored body preview.
 	MaxBodyBytes int
 	// QueueSize is the mirror ring-buffer capacity.
 	QueueSize int
@@ -49,8 +85,8 @@ type Options struct {
 	Workers int
 }
 
-// Server is a Vigilante ingress: Spinner-compatible listener semantics with
-// the Vigilante mirror tap as the relay observation point.
+// Server is Vigilante's ingress: listener semantics with the Vigilante mirror
+// tap as the relay observation point.
 type Server struct {
 	opts     Options
 	queue    *tap.MirrorQueue
@@ -70,15 +106,37 @@ func (s *Server) SetExtraMetrics(fn func(http.ResponseWriter)) {
 
 // NewServer builds the ingress. observe is invoked for every mirrored request.
 func NewServer(opts Options, observe func(context.Context, agent.PacketEvent)) (*Server, error) {
-	if opts.ListenAddr == "" {
-		return nil, fmt.Errorf("gateway: listen address is required")
-	}
-	if opts.TargetURL == "" {
-		return nil, fmt.Errorf("gateway: target URL is required")
-	}
-	targetURL, err := url.Parse(opts.TargetURL)
+	mode, err := ParseMode(string(opts.Mode))
 	if err != nil {
-		return nil, fmt.Errorf("gateway: invalid target URL: %w", err)
+		return nil, err
+	}
+	opts.Mode = mode
+
+	// External mode attaches to an existing ingress endpoint; there is no
+	// local listener to own, so ListenAddr/TargetURL requirements differ.
+	if mode == ModeExternal {
+		if opts.ExternalURL == "" && opts.TargetURL == "" {
+			return nil, fmt.Errorf("gateway: external posture requires an external endpoint or target URL")
+		}
+	} else {
+		if opts.ListenAddr == "" {
+			return nil, fmt.Errorf("gateway: listen address is required")
+		}
+		if opts.TargetURL == "" {
+			return nil, fmt.Errorf("gateway: target URL is required")
+		}
+	}
+
+	// Resolve the forward destination: external forwards to the existing
+	// ingress (so its router/planner still owns routing); local mode
+	// forwards to the configured upstream target.
+	forwardRaw := opts.TargetURL
+	if mode == ModeExternal && opts.ExternalURL != "" {
+		forwardRaw = opts.ExternalURL
+	}
+	forwardURL, err := url.Parse(forwardRaw)
+	if err != nil {
+		return nil, fmt.Errorf("gateway: invalid forward URL %q: %w", forwardRaw, err)
 	}
 
 	queueSize := opts.QueueSize
@@ -88,7 +146,7 @@ func NewServer(opts Options, observe func(context.Context, agent.PacketEvent)) (
 	queue := tap.NewMirrorQueue(queueSize)
 
 	s := &Server{opts: opts, queue: queue}
-	s.relay = s.buildRelay(targetURL)
+	s.relay = s.buildRelay(forwardURL)
 
 	workers := opts.Workers
 	if workers <= 0 {
@@ -111,8 +169,8 @@ func NewServer(opts Options, observe func(context.Context, agent.PacketEvent)) (
 	return s, nil
 }
 
-// handler composes health endpoints with the Vigilante relay (Spinner parity:
-// /health, /ready, /metrics on the Go host in every mode).
+// handler composes health endpoints with the Vigilante relay (/health,
+// /ready, /metrics on the Go host in every mode).
 func (s *Server) handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/health", func(w http.ResponseWriter, _ *http.Request) {
@@ -159,10 +217,10 @@ func (s *Server) buildRelay(targetURL *url.URL) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		tap.PreviewRequest(s.queue, r, listen, target)
 
-		// Spinner bridge parity: consult the Planner for a route plan first.
-		// The plan itself only influences upstream selection; the original
-		// request is forwarded regardless so a Planner outage never blocks
-		// traffic (fail-open, consistent with the mirror queue posture).
+		// Consult the route planner for a plan first. The plan only influences
+		// upstream selection; the original request is forwarded regardless so a
+		// planner outage never blocks traffic (fail-open, consistent with the
+		// mirror queue posture).
 		planReq, err := http.NewRequestWithContext(r.Context(), http.MethodPost,
 			plannerURL+"/_internal/gateway/plan", r.Body)
 		if err == nil {
@@ -177,8 +235,19 @@ func (s *Server) buildRelay(targetURL *url.URL) http.Handler {
 	})
 }
 
+// Mode returns the configured ingress mode.
+func (s *Server) Mode() Mode { return s.opts.Mode }
+
 // ListenAndServe starts the ingress, terminating TLS when cert/key are set.
+// External mode has no local listener (it observes an existing ingress), so
+// it is a no-op that blocks until ctx cancellation via Shutdown.
 func (s *Server) ListenAndServe() error {
+	if s.opts.Mode == ModeExternal {
+		// Nothing to serve locally; the observer queue is already draining.
+		// Block forever until Shutdown is called.
+		<-make(chan struct{})
+		return nil
+	}
 	if s.opts.TLSCertFile != "" && s.opts.TLSKeyFile != "" {
 		s.httpSrv.TLSConfig = &tls.Config{MinVersion: tls.VersionTLS12}
 		return s.httpSrv.ListenAndServeTLS(s.opts.TLSCertFile, s.opts.TLSKeyFile)

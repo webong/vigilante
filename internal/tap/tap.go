@@ -200,7 +200,7 @@ func HTTPMiddlewareGate(next http.Handler, queue *MirrorQueue, listenAddr, targe
 // PreviewRequest clones request metadata and a bounded body preview into queue
 // and restores the body so the real handler is unaffected. It is the shared
 // observation primitive used by HTTPMiddleware and by external ingress
-// adapters (e.g. webong/gateway Spinner) that forward traffic themselves.
+// adapters (e.g. an external gateway) that forward traffic themselves.
 func PreviewRequest(queue *MirrorQueue, r *http.Request, listenAddr, targetAddr string) {
 	var preview string
 	var totalBytes int

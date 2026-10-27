@@ -1,5 +1,5 @@
 // Package status provides the shared /healthz and /metrics HTTP endpoints for
-// every vigilante mode (http, tcp, middleware, spinner). It aggregates queue
+// every vigilante mode (http, tcp, middleware, gateway). It aggregates queue
 // counters and optional alert-store counters in one place.
 package status
 
@@ -22,7 +22,7 @@ func Handler(queue *tap.MirrorQueue, alert AlertStats) http.Handler {
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write([]byte("ok"))
 	})
-	// Spinner parity: keep /health and /ready as aliases.
+	// Keep /health and /ready as aliases for /healthz.
 	mux.HandleFunc("/health", func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write([]byte("ok"))

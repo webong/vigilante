@@ -49,13 +49,14 @@ func run(args []string, out io.Writer) error {
 	fs := flag.NewFlagSet("vigilante", flag.ContinueOnError)
 	fs.SetOutput(out)
 
-	mode := fs.String("mode", "demo", "Execution mode: demo, http, tcp, middleware, spinner, or agent-worker")
+	mode := fs.String("mode", "demo", "Execution mode: demo, http, tcp, middleware, gateway, or agent-worker")
 	listenAddr := fs.String("listen", "127.0.0.1:8080", "Address for vigilante middleware to listen on")
-	targetAddr := fs.String("target", "http://127.0.0.1:9000", "Upstream server URL (for http/spinner) or host:port (for tcp)")
-	tlsCert := fs.String("tls-cert", "", "TLS certificate file for HTTPS on -listen (http/spinner modes)")
-	tlsKey := fs.String("tls-key", "", "TLS private key file for HTTPS on -listen (http/spinner modes)")
-	plannerURL := fs.String("planner-url", "", "Optional webong/gateway Planner URL for route decisions (spinner mode)")
-	plannerToken := fs.String("planner-token", "", "Internal token for the Planner (spinner mode)")
+	targetAddr := fs.String("target", "http://127.0.0.1:9000", "Upstream server URL (for http/gateway) or host:port (for tcp)")
+	tlsCert := fs.String("tls-cert", "", "TLS certificate file for HTTPS on -listen (http/gateway modes)")
+	tlsKey := fs.String("tls-key", "", "TLS private key file for HTTPS on -listen (http/gateway modes)")
+	plannerURL := fs.String("planner-url", "", "Optional upstream gateway/route-planner URL for route decisions (gateway mode)")
+	plannerToken := fs.String("planner-token", "", "Internal token for the upstream route planner (gateway mode)")
+	gatewayPosture := fs.String("gateway", "local", "Gateway posture: local (Vigilante's own ingress, default) or external:<url> (attach to an ingress running elsewhere — recommended if you already run one)")
 	policyFile := fs.String("policy", "", "Path to a policy file (YAML/JSON) with allow/deny/block rules")
 	blockMode := fs.String("block-mode", "log", "Block enforcement mode: log (dry-run), iptables, or nft")
 	blockChain := fs.String("block-chain", "VIGILANTE", "iptables/nft chain name for block enforcement")
@@ -90,6 +91,9 @@ func run(args []string, out io.Writer) error {
 	fs.Visit(func(f *flag.Flag) { set[f.Name] = true })
 	if !set["mode"] && cfg.Mode != "" {
 		*mode = cfg.Mode
+	}
+	if !set["gateway"] && cfg.Gateway != "" {
+		*gatewayPosture = cfg.Gateway
 	}
 	if !set["listen"] && cfg.Listen != "" {
 		*listenAddr = cfg.Listen
@@ -328,10 +332,15 @@ func run(args []string, out io.Writer) error {
 		return runTCPProxy(ctx, out, corr, *listenAddr, *targetAddr, *queueSize)
 	case "middleware":
 		return runMiddlewareMode(ctx, out, corr, *listenAddr, *targetAddr, *queueSize, *tlsCert, *tlsKey, polGate, alertStore, *sampleRate)
-	case "spinner":
-		return runSpinnerMode(ctx, out, corr, *listenAddr, *targetAddr, *plannerURL, *plannerToken, *tlsCert, *tlsKey, *queueSize, polGate, alertStore, *sampleRate)
+	case "gateway":
+		gwPosture, gwExternal := splitGatewayArg(*gatewayPosture)
+		if gwExternal != "" && *targetAddr == "" {
+			// External forwards to the existing gateway, so target is optional.
+			*targetAddr = gwExternal
+		}
+		return runGatewayMode(ctx, out, corr, *listenAddr, *targetAddr, *plannerURL, *plannerToken, *tlsCert, *tlsKey, *queueSize, polGate, alertStore, *sampleRate, gwPosture, gwExternal)
 	default:
-		return fmt.Errorf("unsupported mode %q (choose demo, http, tcp, middleware, spinner, or agent-worker)", *mode)
+		return fmt.Errorf("unsupported mode %q (choose demo, http, tcp, middleware, gateway, or agent-worker)", *mode)
 	}
 }
 
@@ -380,12 +389,15 @@ func runMiddlewareMode(ctx context.Context, out io.Writer, corr *correlator.Corr
 	return nil
 }
 
-// runSpinnerMode runs Vigilante as the relay observation point for a
-// webong/gateway Spinner-style ingress: Spinner owns the public listener and
-// forwarding; Vigilante mirrors every proxied request and triages it.
-func runSpinnerMode(ctx context.Context, out io.Writer, corr *correlator.Correlator, listenAddr, targetRaw, plannerURL, plannerToken, tlsCert, tlsKey string, queueSize int, gate tap.PolicyGate, alertStore *alert.Store, sampleRate float64) error {
+// runGatewayMode runs Vigilante's ingress. In "local" posture Vigilante owns
+// the public listener and forwarding (optionally consulting an upstream route
+// planner); in "external:<url>" posture it attaches to an existing
+// ingress/gateway process at that endpoint, mirroring the traffic it carries.
+func runGatewayMode(ctx context.Context, out io.Writer, corr *correlator.Correlator, listenAddr, targetRaw, plannerURL, plannerToken, tlsCert, tlsKey string, queueSize int, gate tap.PolicyGate, alertStore *alert.Store, sampleRate float64, posture, externalURL string) error {
 	srv, err := gateway.NewServer(gateway.Options{
+		Mode:          gateway.Mode(posture),
 		ListenAddr:    listenAddr,
+		ExternalURL:   externalURL,
 		TargetURL:     targetRaw,
 		PlannerURL:    plannerURL,
 		InternalToken: plannerToken,
@@ -418,8 +430,13 @@ func runSpinnerMode(ctx context.Context, out io.Writer, corr *correlator.Correla
 	if tlsCert != "" && tlsKey != "" {
 		scheme = "https"
 	}
-	fmt.Fprintf(out, "[vigilante] spinner ingress active on %s://%s -> forwarding to %s (planner: %s)\n",
-		scheme, listenAddr, targetRaw, orDash(plannerURL))
+	switch gateway.Mode(posture) {
+	case gateway.ModeExternal:
+		fmt.Fprintf(out, "[vigilante] gateway external posture: observing existing ingress at %s (no local listener; forwarding via it)\n", orDash(externalURL))
+	default:
+		fmt.Fprintf(out, "[vigilante] gateway %s ingress active on %s://%s -> forwarding to %s (planner: %s)\n",
+			posture, scheme, listenAddr, targetRaw, orDash(plannerURL))
+	}
 	if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 		return err
 	}
@@ -445,6 +462,18 @@ func alertStatsOf(s *alert.Store) status.AlertStats {
 		return nil
 	}
 	return func() (uint64, uint64, uint64) { return s.Stats() }
+}
+
+// splitGatewayArg parses a -gateway value of the form "posture" or
+// "posture:<url>", returning the posture and any attached endpoint URL.
+func splitGatewayArg(raw string) (posture, endpoint string) {
+	posture, endpoint, _ = strings.Cut(raw, ":")
+	posture = strings.ToLower(strings.TrimSpace(posture))
+	endpoint = strings.TrimSpace(endpoint)
+	if posture == "" {
+		posture = "local"
+	}
+	return posture, endpoint
 }
 
 func orDash(s string) string {
