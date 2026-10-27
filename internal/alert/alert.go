@@ -19,6 +19,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 )
@@ -64,6 +65,17 @@ type Record struct {
 	Rule       string    `json:"policy_rule,omitempty"` // policy rule that triggered, if any
 	Handler    string    `json:"matched_handler,omitempty"`
 	Advisories []string  `json:"matched_advisories,omitempty"`
+}
+
+// Reader reads persisted alerts for consumers (dashboards, APIs, exporters).
+// It is satisfied by *Store. The store file is append-only, so a Reader can
+// tail it cheaply; implementations may cache the byte offset.
+type Reader interface {
+	// Recent returns up to limit of the newest records, optionally filtered by
+	// a minimum severity. Newest first.
+	Recent(minSeverity Severity, limit int) ([]Record, error)
+	// CountBySeverity returns the total stored record count grouped by severity.
+	CountBySeverity() map[Severity]int
 }
 
 // Options configures the Store.
@@ -243,6 +255,69 @@ func (s *Store) Stats() (stored, delivered, failed uint64) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.stored, s.delivered, s.failed
+}
+
+// Recent returns up to limit of the newest stored records (newest first),
+// optionally filtered by a minimum severity. It reads the current store file
+// (the rotated generations are older, so only the active file is scanned).
+func (s *Store) Recent(minSeverity Severity, limit int) ([]Record, error) {
+	if s == nil {
+		return nil, nil
+	}
+	if limit <= 0 {
+		limit = 100
+	}
+	if limit > 1000 {
+		limit = 1000
+	}
+	s.mu.Lock()
+	path := s.opts.Path
+	s.mu.Unlock()
+
+	data, err := os.ReadFile(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	minRank := rank(minSeverity)
+	var out []Record
+	lines := strings.Split(strings.TrimSpace(string(data)), "\n")
+	// Walk newest-first.
+	for i := len(lines) - 1; i >= 0; i-- {
+		line := strings.TrimSpace(lines[i])
+		if line == "" {
+			continue
+		}
+		var rec Record
+		if json.Unmarshal([]byte(line), &rec) != nil {
+			continue
+		}
+		if minSeverity != "" && rank(rec.Severity) < minRank {
+			continue
+		}
+		out = append(out, rec)
+		if len(out) >= limit {
+			break
+		}
+	}
+	return out, nil
+}
+
+// CountBySeverity returns the total stored record count grouped by severity.
+func (s *Store) CountBySeverity() map[Severity]int {
+	counts := map[Severity]int{}
+	// Read all records (cap high enough for a status page; rotated files are
+	// excluded, matching Recent).
+	recs, err := s.Recent("", 100000)
+	if err != nil {
+		return counts
+	}
+	for _, r := range recs {
+		counts[r.Severity]++
+	}
+	return counts
 }
 
 // Close flushes and closes the store.
