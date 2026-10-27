@@ -332,6 +332,11 @@ func BuildHostReverseOptions(store graph.Store, repoIdx *repo.Index) *engine.Rev
 // Handler is the function signature for an agent evaluating an EnrichedEnvelope.
 type Handler func(context.Context, EnrichedEnvelope) (Verdict, error)
 
+// Runner executes an arbitrary command and returns its combined output. The
+// CLI agent uses this to shell out to an external LLM/agent binary; tests
+// inject fakes. A non-zero exit or non-nil error is surfaced as a triage error.
+type Runner func(ctx context.Context, name string, args ...string) ([]byte, error)
+
 // Gateway manages a verified ext.plugin/v1 session to a local or remote agent.
 type Gateway struct {
 	session *engine.Session
