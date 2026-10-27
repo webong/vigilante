@@ -7,6 +7,8 @@ import (
 	"bytes"
 	"context"
 	"io"
+	"math"
+	"math/rand"
 	"net"
 	"net/http"
 	"net/http/httputil"
@@ -16,6 +18,7 @@ import (
 	"time"
 
 	"github.com/webong/vigilante/internal/agent"
+	"github.com/webong/vigilante/internal/redact"
 )
 
 // Mirror is the minimal seam a host application needs to embed Vigilante in
@@ -73,6 +76,10 @@ type MirrorQueue struct {
 	ch      chan agent.PacketEvent
 	dropped atomic.Uint64
 	queued  atomic.Uint64
+	// sampleRate in [0,1]; 1 mirrors everything. A negative value means
+	// "mirror everything" (unset). Uses atomic float bits for lock-free reads.
+	sampleRate atomic.Uint64 // math.Float64bits, 0 = unset (treat as 1.0)
+	sampledOut atomic.Uint64
 }
 
 // NewMirrorQueue allocates a bounded asynchronous packet mirror queue.
@@ -85,9 +92,36 @@ func NewMirrorQueue(capacity int) *MirrorQueue {
 	}
 }
 
+// SetSampleRate configures what fraction [0,1] of mirrored events are enqueued.
+// Values <= 0 disable sampling (mirror everything); values >= 1 mirror all.
+// Sampling is best-effort and lock-free; it never affects primary traffic.
+func (q *MirrorQueue) SetSampleRate(rate float64) {
+	if rate <= 0 {
+		q.sampleRate.Store(math.Float64bits(0)) // 0 => no sampling
+		return
+	}
+	if rate > 1 {
+		rate = 1
+	}
+	q.sampleRate.Store(math.Float64bits(rate))
+}
+
+// shouldSample reports whether the current event passes the sample filter.
+func (q *MirrorQueue) shouldSample() bool {
+	rate := math.Float64frombits(q.sampleRate.Load())
+	if rate <= 0 || rate >= 1 {
+		return true
+	}
+	return rand.Float64() < rate
+}
+
 // Enqueue attempts to copy an event into the mirror pipeline without blocking.
-// Returns true if queued, or false if dropped due to backpressure.
+// Returns true if queued, or false if dropped due to backpressure or sampling.
 func (q *MirrorQueue) Enqueue(ev agent.PacketEvent) bool {
+	if !q.shouldSample() {
+		q.sampledOut.Add(1)
+		return false
+	}
 	select {
 	case q.ch <- ev:
 		q.queued.Add(1)
@@ -107,6 +141,9 @@ func (q *MirrorQueue) Events() <-chan agent.PacketEvent {
 func (q *MirrorQueue) Stats() (queued, dropped uint64) {
 	return q.queued.Load(), q.dropped.Load()
 }
+
+// SampledOut returns how many events were skipped by the sample filter.
+func (q *MirrorQueue) SampledOut() uint64 { return q.sampledOut.Load() }
 
 // Drain runs worker goroutines that consume mirrored events and pass them to fn.
 func (q *MirrorQueue) Drain(ctx context.Context, workers int, fn func(context.Context, agent.PacketEvent)) {
@@ -197,10 +234,14 @@ func PreviewRequest(queue *MirrorQueue, r *http.Request, listenAddr, targetAddr 
 		DstAddr:        listenAddr,
 		TargetAddr:     targetAddr,
 		Method:         r.Method,
-		Path:           r.URL.RequestURI(),
-		Headers:        headers,
-		PayloadPreview: preview,
+		Path:           r.URL.Path,             // path only (no query)
+		Headers:        headers,                // sensitive headers already [REDACTED]
+		PayloadPreview: redact.String(preview), // scrub secrets from body preview
 		PayloadBytes:   totalBytes,
+	}
+	// Scrub secrets from the query string while preserving its structure.
+	if q := r.URL.RawQuery; q != "" {
+		ev.Path += "?" + redact.Query(q)
 	}
 	queue.Enqueue(ev)
 }
