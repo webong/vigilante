@@ -19,7 +19,7 @@ import (
 	"github.com/webong/ext/res/system"
 	"github.com/webong/ext/res/system/graph"
 	"github.com/webong/ext/res/system/network"
-	"github.com/webong/vigilante/internal/agent"
+	"github.com/webong/vigilante/ext/agent"
 	"github.com/webong/vigilante/internal/deps"
 	"github.com/webong/vigilante/internal/repo"
 	"github.com/webong/vigilante/internal/schema"

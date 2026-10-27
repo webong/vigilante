@@ -9,7 +9,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/webong/vigilante/internal/agent"
+	"github.com/webong/vigilante/ext/agent"
 )
 
 func TestPreviewRequestRedactsSecrets(t *testing.T) {

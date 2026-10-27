@@ -9,7 +9,7 @@ import (
 	"time"
 
 	"github.com/webong/ext/res/system"
-	"github.com/webong/vigilante/internal/agent"
+	"github.com/webong/vigilante/ext/agent"
 	"github.com/webong/vigilante/internal/deps"
 )
 

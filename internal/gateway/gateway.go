@@ -24,7 +24,7 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/webong/vigilante/internal/agent"
+	"github.com/webong/vigilante/ext/agent"
 	"github.com/webong/vigilante/internal/tap"
 )
 

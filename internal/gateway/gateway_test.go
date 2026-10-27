@@ -20,7 +20,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/webong/vigilante/internal/agent"
+	"github.com/webong/vigilante/ext/agent"
 )
 
 func TestServerForwardsAndObserves(t *testing.T) {

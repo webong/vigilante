@@ -4,6 +4,12 @@
 // agent. It supports both in-process guests and out-of-process JSON-line agents
 // supervised by res/system/supervisor, with reverse host callbacks so the agent
 // can query the live ext.system graph or read source files on demand.
+//
+// This package lives under ext/ (like ext/obs) because the agent is itself an
+// ext.plugin/v1 plugin: it is authored with engine/guest/author and runs behind
+// an engine.Session. It exposes three selectable backends behind one contract —
+// builtin (in-process rule engine), cli (an external LLM/agent binary), and
+// supervised (out-of-process via ext/res/system/supervisor).
 package agent
 
 import (
