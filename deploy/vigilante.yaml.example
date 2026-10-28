@@ -1,0 +1,58 @@
+# Vigilante example config (YAML). Run with:
+#   vigilante -config vigilante.yaml
+# CLI flags always override these values. All keys are optional.
+#
+# This replaces a long command line: everything you'd pass on the CLI can be
+# set here instead.
+
+# demo | http | tcp | middleware | gateway | passive | agent-worker
+mode: http
+
+# Agent backend: builtin | cli:<command> | supervised
+agent: builtin
+agent_timeout: 30s
+
+# Gateway posture (mode: gateway): local | external:<url>
+gateway: local
+
+listen: ":8080"
+target: "http://127.0.0.1:3000"
+
+# Codebase index: any host URL, owner/repo shorthand, local path, or "auto"
+repo: auto
+# repo_ref: main
+# repo_token: ghp_xxx            # prefer the VIGILANTE_GIT_TOKEN env var
+# repo_ssh_key: /etc/vigilante/id_ed25519
+
+# TLS on the public listener
+# tls_cert: /etc/vigilante/fullchain.pem
+# tls_key: /etc/vigilante/privkey.pem
+
+# Upstream route planner (fail-open)
+# planner_url: http://127.0.0.1:8081
+# planner_token: changeme
+
+# Policy enforcement
+# policy: /etc/vigilante/policy.yaml
+block_mode: log            # log (dry-run) | iptables | nft
+block_chain: VIGILANTE
+block_threshold: 5         # auto-block after N qualifying verdicts (0 = off)
+block_window: 1m
+block_min_severity: high
+
+# Alert persistence + delivery (webhook retries with backoff)
+# alert_file: /var/log/vigilante/alerts.jsonl
+# alert_deliver_url: https://hooks.example.com/vigilante
+alert_min_severity: high
+alert_max_bytes: 10485760   # rotate after 10 MiB
+alert_keep: 3
+
+# Metrics / graph / sampling
+queue_size: 1024
+sample_rate: 1.0            # 0..1 fraction of flows sent to the agent
+obs: true                   # dashboard + JSON API at /obs/*
+# graph_file: /var/lib/vigilante/graph.json
+
+# Passive sensor (mode: passive)
+# passive_iface: eth0
+# passive_ports: 80,443,8080

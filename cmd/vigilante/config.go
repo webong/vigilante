@@ -5,42 +5,71 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"reflect"
+	"sort"
 	"strconv"
 	"strings"
+	"time"
 )
 
-// Config is the optional config file (-config) that supplies defaults for any
-// flag not explicitly set on the command line. JSON is handled natively; the
-// same minimal YAML subset used by the policy parser is accepted. CLI flags
-// always win over config values.
+// Config is the config file (-config, YAML or JSON) supplying defaults for any
+// flag not explicitly set on the command line. CLI flags always win over config
+// values. Keys use the `yaml` tag (snake_case); types are coerced automatically
+// (string/int/float/bool/duration), and unknown keys are rejected so typos
+// surface immediately.
+//
+// Anything you would otherwise pass on the CLI can live here, so setup is a
+// single file instead of a long command line.
 type Config struct {
-	Mode         string  `json:"mode" yaml:"mode"`
-	Agent        string  `json:"agent" yaml:"agent"`     // builtin | cli:<cmd> | supervised
-	Gateway      string  `json:"gateway" yaml:"gateway"` // posture: local | external:<url>
-	Listen       string  `json:"listen" yaml:"listen"`
-	Target       string  `json:"target" yaml:"target"`
-	Repo         string  `json:"repo" yaml:"repo"`
-	RepoRef      string  `json:"repo_ref" yaml:"repo_ref"`
-	RepoUser     string  `json:"repo_user" yaml:"repo_user"`
-	RepoToken    string  `json:"repo_token" yaml:"repo_token"`
-	RepoSSHKey   string  `json:"repo_ssh_key" yaml:"repo_ssh_key"`
-	TLSCert      string  `json:"tls_cert" yaml:"tls_cert"`
-	TLSKey       string  `json:"tls_key" yaml:"tls_key"`
-	PlannerURL   string  `json:"planner_url" yaml:"planner_url"`
-	PlannerToken string  `json:"planner_token" yaml:"planner_token"`
-	Policy       string  `json:"policy" yaml:"policy"`
-	BlockMode    string  `json:"block_mode" yaml:"block_mode"`
-	BlockChain   string  `json:"block_chain" yaml:"block_chain"`
-	AlertFile    string  `json:"alert_file" yaml:"alert_file"`
-	AlertDeliver string  `json:"alert_deliver_url" yaml:"alert_deliver_url"`
-	AlertMinSev  string  `json:"alert_min_severity" yaml:"alert_min_severity"`
-	QueueSize    int     `json:"queue_size" yaml:"queue_size"`
-	SampleRate   float64 `json:"sample_rate" yaml:"sample_rate"`
-	Supervised   bool    `json:"supervised_agent" yaml:"supervised_agent"`
+	// Mode: demo | http | tcp | middleware | gateway | passive | agent-worker
+	Mode string `yaml:"mode" json:"mode"`
+	// Agent: builtin | cli:<cmd> | supervised
+	Agent string `yaml:"agent" json:"agent"`
+	// Gateway posture: local | external:<url>
+	Gateway string `yaml:"gateway" json:"gateway"`
+
+	Listen string `yaml:"listen" json:"listen"`
+	Target string `yaml:"target" json:"target"`
+
+	Repo       string `yaml:"repo" json:"repo"`
+	RepoRef    string `yaml:"repo_ref" json:"repo_ref"`
+	RepoUser   string `yaml:"repo_user" json:"repo_user"`
+	RepoToken  string `yaml:"repo_token" json:"repo_token"`
+	RepoSSHKey string `yaml:"repo_ssh_key" json:"repo_ssh_key"`
+
+	TLSCert string `yaml:"tls_cert" json:"tls_cert"`
+	TLSKey  string `yaml:"tls_key" json:"tls_key"`
+
+	PlannerURL   string `yaml:"planner_url" json:"planner_url"`
+	PlannerToken string `yaml:"planner_token" json:"planner_token"`
+
+	Policy string `yaml:"policy" json:"policy"`
+
+	BlockMode        string        `yaml:"block_mode" json:"block_mode"`
+	BlockChain       string        `yaml:"block_chain" json:"block_chain"`
+	BlockThreshold   int           `yaml:"block_threshold" json:"block_threshold"`
+	BlockWindow      time.Duration `yaml:"block_window" json:"block_window"`
+	BlockMinSeverity string        `yaml:"block_min_severity" json:"block_min_severity"`
+
+	AlertFile        string `yaml:"alert_file" json:"alert_file"`
+	AlertDeliver     string `yaml:"alert_deliver_url" json:"alert_deliver_url"`
+	AlertMinSeverity string `yaml:"alert_min_severity" json:"alert_min_severity"`
+	AlertMaxBytes    int64  `yaml:"alert_max_bytes" json:"alert_max_bytes"`
+	AlertKeep        int    `yaml:"alert_keep" json:"alert_keep"`
+
+	GraphFile    string        `yaml:"graph_file" json:"graph_file"`
+	QueueSize    int           `yaml:"queue_size" json:"queue_size"`
+	SampleRate   float64       `yaml:"sample_rate" json:"sample_rate"`
+	AgentTimeout time.Duration `yaml:"agent_timeout" json:"agent_timeout"`
+	Obs          *bool         `yaml:"obs" json:"obs"`
+	Supervised   bool          `yaml:"supervised_agent" json:"supervised_agent"`
+
+	PassiveIface string `yaml:"passive_iface" json:"passive_iface"`
+	PassivePorts string `yaml:"passive_ports" json:"passive_ports"`
 }
 
-// loadConfig reads a JSON or YAML config file; missing file with an empty
-// path returns an empty config.
+// loadConfig reads a JSON or YAML config file; an empty path returns an empty
+// config.
 func loadConfig(path string) (Config, error) {
 	if path == "" {
 		return Config{}, nil
@@ -54,21 +83,42 @@ func loadConfig(path string) (Config, error) {
 		return Config{}, nil
 	}
 	if trimmed[0] == '{' {
-		var c Config
-		dec := json.NewDecoder(bytes.NewReader(trimmed))
-		dec.DisallowUnknownFields()
-		if err := dec.Decode(&c); err != nil {
-			return Config{}, fmt.Errorf("config: invalid JSON: %w", err)
-		}
-		return c, nil
+		return decodeJSON(trimmed)
 	}
-	return decodeSimpleYAML(trimmed)
+	return decodeYAML(trimmed)
 }
 
-// decodeSimpleYAML parses flat "key: value" lines (no nesting) — enough for
-// the config file shape. Lists/objects belong in JSON.
-func decodeSimpleYAML(data []byte) (Config, error) {
+// decodeJSON parses a JSON config, rejecting unknown fields so typos surface.
+func decodeJSON(data []byte) (Config, error) {
 	var c Config
+	dec := json.NewDecoder(bytes.NewReader(data))
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(&c); err != nil {
+		return Config{}, fmt.Errorf("config: invalid JSON: %w", err)
+	}
+	return c, nil
+}
+
+// decodeYAML parses a flat "key: value" YAML document into Config by mapping
+// `yaml` struct tags to fields and coercing values to each field's type.
+// Nested structures/lists are not supported here (use JSON for those).
+func decodeYAML(data []byte) (Config, error) {
+	var c Config
+	rv := reflect.ValueOf(&c).Elem()
+	rt := rv.Type()
+	byKey := map[string]int{}
+	for i := 0; i < rt.NumField(); i++ {
+		key := strings.Split(rt.Field(i).Tag.Get("yaml"), ",")[0]
+		if key != "" && key != "-" {
+			byKey[key] = i
+		}
+	}
+	keys := make([]string, 0, len(byKey))
+	for k := range byKey {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+
 	for _, raw := range strings.Split(string(data), "\n") {
 		line := strings.TrimSpace(raw)
 		if line == "" || strings.HasPrefix(line, "#") {
@@ -80,68 +130,89 @@ func decodeSimpleYAML(data []byte) (Config, error) {
 		}
 		key = strings.TrimSpace(key)
 		val = strings.Trim(strings.TrimSpace(val), `"'`)
-		switch key {
-		case "mode":
-			c.Mode = val
-		case "agent":
-			c.Agent = val
-		case "gateway":
-			c.Gateway = val
-		case "listen":
-			c.Listen = val
-		case "target":
-			c.Target = val
-		case "repo":
-			c.Repo = val
-		case "repo_ref":
-			c.RepoRef = val
-		case "repo_user":
-			c.RepoUser = val
-		case "repo_token":
-			c.RepoToken = val
-		case "repo_ssh_key":
-			c.RepoSSHKey = val
-		case "tls_cert":
-			c.TLSCert = val
-		case "tls_key":
-			c.TLSKey = val
-		case "planner_url":
-			c.PlannerURL = val
-		case "planner_token":
-			c.PlannerToken = val
-		case "policy":
-			c.Policy = val
-		case "block_mode":
-			c.BlockMode = val
-		case "block_chain":
-			c.BlockChain = val
-		case "alert_file":
-			c.AlertFile = val
-		case "alert_deliver_url":
-			c.AlertDeliver = val
-		case "alert_min_severity":
-			c.AlertMinSev = val
-		case "queue_size":
-			n, err := strconv.Atoi(val)
-			if err != nil {
-				return Config{}, fmt.Errorf("config: queue_size: %w", err)
-			}
-			c.QueueSize = n
-		case "sample_rate":
-			fl, err := strconv.ParseFloat(val, 64)
-			if err != nil {
-				return Config{}, fmt.Errorf("config: sample_rate: %w", err)
-			}
-			c.SampleRate = fl
-		case "supervised_agent":
-			b, err := strconv.ParseBool(val)
-			if err != nil {
-				return Config{}, fmt.Errorf("config: supervised_agent: %w", err)
-			}
-			c.Supervised = b
-		default:
-			return Config{}, fmt.Errorf("config: unknown key %q", key)
+		// Strip a trailing inline comment (space + # ...), but not a '#' inside
+		// a quoted value or part of a value like a URL fragment.
+		if i := indexComment(val); i >= 0 {
+			val = strings.TrimSpace(val[:i])
+			val = strings.Trim(val, `"'`)
+		}
+		idx, found := byKey[key]
+		if !found {
+			return Config{}, fmt.Errorf("config: unknown key %q (valid: %s)", key, strings.Join(keys, ", "))
+		}
+		if err := setField(rv.Field(idx), rt.Field(idx), val); err != nil {
+			return Config{}, fmt.Errorf("config: %s: %w", key, err)
 		}
 	}
 	return c, nil
+}
+
+// indexComment returns the index of a trailing inline " #..." comment in a
+// scalar value, or -1. It ignores '#' that is part of the value (URL fragments,
+// no leading space) and quoted strings.
+func indexComment(val string) int {
+	inQuote := byte(0)
+	for i := 0; i < len(val); i++ {
+		c := val[i]
+		if inQuote != 0 {
+			if c == inQuote {
+				inQuote = 0
+			}
+			continue
+		}
+		if c == '"' || c == '\'' {
+			inQuote = c
+			continue
+		}
+		if c == '#' && i > 0 && (val[i-1] == ' ' || val[i-1] == '\t') {
+			return i
+		}
+	}
+	return -1
+}
+
+// setField coerces a string value into the field's type.
+func setField(fv reflect.Value, ft reflect.StructField, val string) error {
+	switch ft.Type.Kind() {
+	case reflect.String:
+		fv.SetString(val)
+	case reflect.Bool:
+		b, err := strconv.ParseBool(val)
+		if err != nil {
+			return fmt.Errorf("expected bool, got %q", val)
+		}
+		fv.SetBool(b)
+	case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64:
+		if ft.Type == reflect.TypeOf(time.Duration(0)) {
+			d, err := time.ParseDuration(val)
+			if err != nil {
+				return fmt.Errorf("expected duration (e.g. 30s, 1m), got %q", val)
+			}
+			fv.SetInt(int64(d))
+			return nil
+		}
+		n, err := strconv.ParseInt(val, 10, 64)
+		if err != nil {
+			return fmt.Errorf("expected integer, got %q", val)
+		}
+		fv.SetInt(n)
+	case reflect.Float32, reflect.Float64:
+		fl, err := strconv.ParseFloat(val, 64)
+		if err != nil {
+			return fmt.Errorf("expected number, got %q", val)
+		}
+		fv.SetFloat(fl)
+	case reflect.Ptr:
+		// *bool optional flag: allocate and set.
+		b, err := strconv.ParseBool(val)
+		if err != nil {
+			return fmt.Errorf("expected bool, got %q", val)
+		}
+		p := reflect.New(fv.Type().Elem())
+		p.Elem().SetBool(b)
+		fv.Set(p)
+	default:
+		return fmt.Errorf("unsupported field type %s", ft.Type)
+	}
+	return nil
 }

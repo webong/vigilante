@@ -93,78 +93,71 @@ func run(args []string, out io.Writer) error {
 	}
 
 	// Apply config-file values for any flag the user did not set explicitly
-	// (CLI flags always win).
+	// (CLI flags always win). Each key maps to its flag.
 	cfg, err := loadConfig(*configPath)
 	if err != nil {
 		return err
 	}
 	set := map[string]bool{}
 	fs.Visit(func(f *flag.Flag) { set[f.Name] = true })
-	if !set["mode"] && cfg.Mode != "" {
-		*mode = cfg.Mode
+
+	applyStr := func(flagSet bool, dst *string, val string) {
+		if !flagSet && val != "" {
+			*dst = val
+		}
 	}
-	if !set["agent"] && cfg.Agent != "" {
-		*agentKind = cfg.Agent
+	applyInt := func(flagSet bool, dst *int, val int) {
+		if !flagSet && val != 0 {
+			*dst = val
+		}
 	}
-	if !set["gateway"] && cfg.Gateway != "" {
-		*gatewayPosture = cfg.Gateway
+	applyInt64 := func(flagSet bool, dst *int64, val int64) {
+		if !flagSet && val != 0 {
+			*dst = val
+		}
 	}
-	if !set["listen"] && cfg.Listen != "" {
-		*listenAddr = cfg.Listen
+	applyDur := func(flagSet bool, dst *time.Duration, val time.Duration) {
+		if !flagSet && val != 0 {
+			*dst = val
+		}
 	}
-	if !set["target"] && cfg.Target != "" {
-		*targetAddr = cfg.Target
-	}
-	if !set["repo"] && cfg.Repo != "" {
-		*repoTarget = cfg.Repo
-	}
-	if !set["repo-ref"] && cfg.RepoRef != "" {
-		*repoRef = cfg.RepoRef
-	}
-	if !set["repo-user"] && cfg.RepoUser != "" {
-		*repoUser = cfg.RepoUser
-	}
-	if !set["repo-token"] && cfg.RepoToken != "" {
-		*repoToken = cfg.RepoToken
-	}
-	if !set["repo-ssh-key"] && cfg.RepoSSHKey != "" {
-		*repoSSHKey = cfg.RepoSSHKey
-	}
-	if !set["tls-cert"] && cfg.TLSCert != "" {
-		*tlsCert = cfg.TLSCert
-	}
-	if !set["tls-key"] && cfg.TLSKey != "" {
-		*tlsKey = cfg.TLSKey
-	}
-	if !set["planner-url"] && cfg.PlannerURL != "" {
-		*plannerURL = cfg.PlannerURL
-	}
-	if !set["planner-token"] && cfg.PlannerToken != "" {
-		*plannerToken = cfg.PlannerToken
-	}
-	if !set["policy"] && cfg.Policy != "" {
-		*policyFile = cfg.Policy
-	}
-	if !set["block-mode"] && cfg.BlockMode != "" {
-		*blockMode = cfg.BlockMode
-	}
-	if !set["block-chain"] && cfg.BlockChain != "" {
-		*blockChain = cfg.BlockChain
-	}
-	if !set["alert-file"] && cfg.AlertFile != "" {
-		*alertFile = cfg.AlertFile
-	}
-	if !set["alert-deliver-url"] && cfg.AlertDeliver != "" {
-		*alertDeliver = cfg.AlertDeliver
-	}
-	if !set["alert-min-severity"] && cfg.AlertMinSev != "" {
-		*alertMinSev = cfg.AlertMinSev
-	}
-	if !set["queue-size"] && cfg.QueueSize > 0 {
-		*queueSize = cfg.QueueSize
-	}
+
+	applyStr(set["mode"], mode, cfg.Mode)
+	applyStr(set["agent"], agentKind, cfg.Agent)
+	applyStr(set["gateway"], gatewayPosture, cfg.Gateway)
+	applyStr(set["listen"], listenAddr, cfg.Listen)
+	applyStr(set["target"], targetAddr, cfg.Target)
+	applyStr(set["repo"], repoTarget, cfg.Repo)
+	applyStr(set["repo-ref"], repoRef, cfg.RepoRef)
+	applyStr(set["repo-user"], repoUser, cfg.RepoUser)
+	applyStr(set["repo-token"], repoToken, cfg.RepoToken)
+	applyStr(set["repo-ssh-key"], repoSSHKey, cfg.RepoSSHKey)
+	applyStr(set["tls-cert"], tlsCert, cfg.TLSCert)
+	applyStr(set["tls-key"], tlsKey, cfg.TLSKey)
+	applyStr(set["planner-url"], plannerURL, cfg.PlannerURL)
+	applyStr(set["planner-token"], plannerToken, cfg.PlannerToken)
+	applyStr(set["policy"], policyFile, cfg.Policy)
+	applyStr(set["block-mode"], blockMode, cfg.BlockMode)
+	applyStr(set["block-chain"], blockChain, cfg.BlockChain)
+	applyStr(set["block-min-severity"], blockMinSev, cfg.BlockMinSeverity)
+	applyStr(set["alert-file"], alertFile, cfg.AlertFile)
+	applyStr(set["alert-deliver-url"], alertDeliver, cfg.AlertDeliver)
+	applyStr(set["alert-min-severity"], alertMinSev, cfg.AlertMinSeverity)
+	applyStr(set["graph-file"], graphFile, cfg.GraphFile)
+	applyStr(set["passive-iface"], passiveIface, cfg.PassiveIface)
+	applyStr(set["passive-ports"], passivePorts, cfg.PassivePorts)
+
+	applyInt(set["block-threshold"], blockThreshold, cfg.BlockThreshold)
+	applyInt(set["alert-keep"], alertKeep, cfg.AlertKeep)
+	applyInt(set["queue-size"], queueSize, cfg.QueueSize)
+	applyInt64(set["alert-max-bytes"], alertMaxBytes, cfg.AlertMaxBytes)
+	applyDur(set["block-window"], blockWindow, cfg.BlockWindow)
+	applyDur(set["agent-timeout"], agentTimeout, cfg.AgentTimeout)
 	if !set["sample-rate"] && cfg.SampleRate > 0 {
 		*sampleRate = cfg.SampleRate
+	}
+	if !set["obs"] && cfg.Obs != nil {
+		*obsEnabled = *cfg.Obs
 	}
 	if !set["supervised-agent"] && cfg.Supervised {
 		*supervisedAgent = true

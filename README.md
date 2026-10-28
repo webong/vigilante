@@ -264,33 +264,47 @@ transient failures with exponential backoff (default 3 attempts, 250ms base).
 When `-mode gateway` runs with a store, `/metrics` also exposes
 `vigilante_alerts_{stored,delivered,failed}_total`.
 
-### 11. Config File
-For systemd/containers, put defaults in a config file and override per-deployment
-via CLI flags (flags always win):
+### 11. Config File (YAML or JSON) — friendly setup
+For systemd/containers — or just a cleaner command line — put everything in a
+config file and override per-deployment via CLI flags (flags always win).
+**Every CLI flag has a config key**, so setup is one file instead of a long
+command. See [`deploy/vigilante.yaml.example`](deploy/vigilante.yaml.example)
+for the fully-commented reference.
 
-```json
-// vigilante.json
-{
-  "mode": "http",
-  "listen": ":8080",
-  "target": "http://127.0.0.1:3000",
-  "repo": "https://github.com/owner/app",
-  "policy": "/etc/vigilante/policy.yaml",
-  "block_mode": "log",
-  "alert_file": "/var/log/vigilante/alerts.jsonl",
-  "alert_min_severity": "high",
-  "alert_deliver_url": "https://hooks.example.com/vigilante",
-  "queue_size": 1024
-}
+```yaml
+# vigilante.yaml
+mode: http
+listen: ":8080"
+target: "http://127.0.0.1:3000"
+repo: auto
+
+agent: builtin            # builtin | cli:<cmd> | supervised
+agent_timeout: 30s
+
+policy: /etc/vigilante/policy.yaml
+block_mode: log           # log | iptables | nft
+block_threshold: 5        # auto-block after N high+ verdicts
+block_window: 1m
+
+alert_file: /var/log/vigilante/alerts.jsonl
+alert_min_severity: high
+alert_deliver_url: https://hooks.example.com/vigilante
+
+queue_size: 1024
+sample_rate: 1.0
+obs: true                 # dashboard + JSON API at /obs/*
 ```
 
 ```sh
-go run ./cmd/vigilante -config vigilante.json
-go run ./cmd/vigilante -config vigilante.json -listen :9443 -tls-cert cert.pem -tls-key key.pem  # override
+vigilante -config vigilante.yaml
+vigilante -config vigilante.yaml -listen :9443 -tls-cert cert.pem -tls-key key.pem   # override
 ```
 
-Flat YAML (`key: value` lines) is also accepted; lists/objects belong in JSON.
-Unknown keys are rejected to catch typos early.
+**Config features:**
+- YAML (`key: value`, inline `# comments`) **or** JSON — same keys.
+- Types coerced automatically: strings, ints, floats, bools, **durations** (`30s`, `1m`).
+- **Unknown keys are rejected** with the list of valid keys, so typos surface immediately.
+- Lists/objects (e.g. rich JSON) belong in the JSON form.
 
 ### 12. Install (personal computer or server)
 
