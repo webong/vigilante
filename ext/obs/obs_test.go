@@ -10,6 +10,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/webong/ext/pkg/ext-go/engine"
 	"github.com/webong/vigilante/internal/alert"
 )
 
@@ -26,6 +27,67 @@ func newTestStore(t *testing.T) *alert.Store {
 	s.Record(alert.Record{FlowID: "f2", Severity: alert.SeverityHigh, Action: "alert", Method: "POST", Path: "/login"})
 	s.Record(alert.Record{FlowID: "f3", Severity: alert.SeverityInfo, Action: "observe", Method: "GET", Path: "/health"})
 	return s
+}
+
+// TestActionsWithView verifies the action view maps through the operation.
+func TestActionsWithView(t *testing.T) {
+	svc := NewService(nil, nil, nil)
+	svc.SetActions(func() ActionsOutput {
+		return ActionsOutput{
+			Capabilities: []ActionCapability{{ID: "block", Label: "Block", Scopes: []string{"ip"}, Reversible: true}},
+			Active:       []ActiveDecision{{ID: "d1", Action: "block", Scope: "ip", Target: "203.0.113.9"}},
+			Decisions:    []ActionDecision{{ID: "d1", Action: "block", Status: "applied"}},
+		}
+	})
+	out, err := svc.Actions(context.Background(), engine.Request{}, ActionsInput{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(out.Capabilities) != 1 || out.Capabilities[0].ID != "block" {
+		t.Fatalf("capabilities = %+v", out.Capabilities)
+	}
+	if len(out.Active) != 1 || out.Active[0].Target != "203.0.113.9" {
+		t.Fatalf("active = %+v", out.Active)
+	}
+	if len(out.Decisions) != 1 || out.Decisions[0].Status != "applied" {
+		t.Fatalf("decisions = %+v", out.Decisions)
+	}
+}
+
+// TestActionsWithoutViewReturnsEmpty verifies a nil view yields empty arrays.
+func TestActionsWithoutViewReturnsEmpty(t *testing.T) {
+	out, err := NewService(nil, nil, nil).Actions(context.Background(), engine.Request{}, ActionsInput{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if out.Capabilities == nil || out.Active == nil || out.Decisions == nil {
+		t.Fatal("expected non-nil empty slices")
+	}
+}
+
+// TestActorsWithView verifies the actor view maps through the operation and its
+// input filter is passed along.
+func TestActorsWithView(t *testing.T) {
+	svc := NewService(nil, nil, nil)
+	var got ActorsInput
+	svc.SetActors(func(in ActorsInput) ActorsOutput {
+		got = in
+		return ActorsOutput{
+			Count:      1,
+			Suspicious: 1,
+			Actors:     []Actor{{Key: "203.0.113.9", Risk: 60, Suspicious: true}},
+		}
+	})
+	out, err := svc.Actors(context.Background(), engine.Request{}, ActorsInput{Suspicious: true, Limit: 7})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !got.Suspicious || got.Limit != 7 {
+		t.Fatalf("filter not passed: %+v", got)
+	}
+	if len(out.Actors) != 1 || out.Actors[0].Key != "203.0.113.9" {
+		t.Fatalf("actors = %+v", out.Actors)
+	}
 }
 
 // TestExtPluginEndToEnd runs the whole path: Service -> BuildGuest -> engine
@@ -98,6 +160,38 @@ func TestExtPluginEndToEnd(t *testing.T) {
 		}
 	})
 
+	t.Run("actions via session", func(t *testing.T) {
+		rr := httptest.NewRecorder()
+		bridge.ServeHTTP(rr, httptest.NewRequest(http.MethodGet, "/actions", nil))
+		if rr.Code != http.StatusOK {
+			t.Fatalf("status = %d", rr.Code)
+		}
+		var out ActionsOutput
+		if err := json.Unmarshal(rr.Body.Bytes(), &out); err != nil {
+			t.Fatalf("decode: %v (%s)", err, rr.Body.String())
+		}
+		// No action view attached: the operation must return empty lists, not
+		// null, so a client can iterate without nil-checks.
+		if out.Capabilities == nil || out.Active == nil || out.Decisions == nil {
+			t.Fatalf("expected empty arrays, got nil: %+v", out)
+		}
+	})
+
+	t.Run("actors via session", func(t *testing.T) {
+		rr := httptest.NewRecorder()
+		bridge.ServeHTTP(rr, httptest.NewRequest(http.MethodGet, "/actors?limit=5", nil))
+		if rr.Code != http.StatusOK {
+			t.Fatalf("status = %d", rr.Code)
+		}
+		var out ActorsOutput
+		if err := json.Unmarshal(rr.Body.Bytes(), &out); err != nil {
+			t.Fatalf("decode: %v (%s)", err, rr.Body.String())
+		}
+		if out.Actors == nil {
+			t.Fatal("expected empty actors array, not null")
+		}
+	})
+
 	t.Run("unknown path 404", func(t *testing.T) {
 		rr := httptest.NewRecorder()
 		bridge.ServeHTTP(rr, httptest.NewRequest(http.MethodGet, "/nope", nil))
@@ -120,8 +214,8 @@ func TestBuildGuestDescriptor(t *testing.T) {
 	found := false
 	for _, c := range desc.Contracts {
 		if c.Name == ContractName && c.Version == ContractVersion {
-			if len(c.Operations) != 3 {
-				t.Fatalf("ops = %d, want 3", len(c.Operations))
+			if len(c.Operations) != 5 {
+				t.Fatalf("ops = %d, want 5", len(c.Operations))
 			}
 			found = true
 		}

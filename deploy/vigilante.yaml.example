@@ -58,6 +58,11 @@ action_max_ttl: 24h        # ceiling on any decision's lifetime
 # action_webhook_revert: https://api.example.com/zones/ZONE/rules/{ref}
 # action_webhook_token: changeme   # sent as "Authorization: Bearer <token>"
 
+# Actor aggregation (served as data at /obs/actors)
+actor_window: 24h           # sliding window over which risk is scored
+actor_risk_threshold: 50    # risk at/above which an actor is "suspicious"
+actor_max: 10000            # actors retained before the least-recently-seen is evicted
+
 # Alert persistence + delivery (webhook retries with backoff)
 # alert_file: /var/log/vigilante/alerts.jsonl
 # alert_deliver_url: https://hooks.example.com/vigilante

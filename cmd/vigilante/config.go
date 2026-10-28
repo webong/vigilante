@@ -62,6 +62,10 @@ type Config struct {
 	ActionWebhookRevert string        `yaml:"action_webhook_revert" json:"action_webhook_revert"`
 	ActionWebhookToken  string        `yaml:"action_webhook_token" json:"action_webhook_token"`
 
+	ActorWindow        time.Duration `yaml:"actor_window" json:"actor_window"`
+	ActorRiskThreshold int           `yaml:"actor_risk_threshold" json:"actor_risk_threshold"`
+	ActorMax           int           `yaml:"actor_max" json:"actor_max"`
+
 	AlertFile        string `yaml:"alert_file" json:"alert_file"`
 	AlertDeliver     string `yaml:"alert_deliver_url" json:"alert_deliver_url"`
 	AlertMinSeverity string `yaml:"alert_min_severity" json:"alert_min_severity"`

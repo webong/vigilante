@@ -54,6 +54,7 @@ type PacketEvent struct {
 	Method         string            `json:"method,omitempty"`
 	Path           string            `json:"path,omitempty"`
 	Headers        map[string]string `json:"headers,omitempty"`
+	TLSFingerprint string            `json:"tls_fingerprint,omitempty"`
 	PayloadPreview string            `json:"payload_preview,omitempty"`
 	PayloadBytes   int               `json:"payload_bytes"`
 }

@@ -33,6 +33,8 @@ const (
 
 	OpSummary   = "summary"
 	OpAlerts    = "alerts"
+	OpActions   = "actions"
+	OpActors    = "actors"
 	OpDashboard = "dashboard"
 )
 
@@ -67,6 +69,100 @@ type AlertsOutput struct {
 	Alerts []alert.Record `json:"alerts"`
 }
 
+// ActionsInput is the (empty) filter for the actions operation.
+type ActionsInput struct{}
+
+// ActionParam mirrors one executor argument for generated UIs.
+type ActionParam struct {
+	Name     string `json:"name"`
+	Label    string `json:"label,omitempty"`
+	Type     string `json:"type,omitempty"`
+	Required bool   `json:"required,omitempty"`
+	Default  string `json:"default,omitempty"`
+}
+
+// ActionCapability is the read view of one registered action.
+type ActionCapability struct {
+	ID          string        `json:"id"`
+	Label       string        `json:"label"`
+	Description string        `json:"description,omitempty"`
+	Scopes      []string      `json:"scopes"`
+	DefaultTTL  time.Duration `json:"default_ttl,omitempty"`
+	MaxTTL      time.Duration `json:"max_ttl,omitempty"`
+	Reversible  bool          `json:"reversible"`
+	Destructive bool          `json:"destructive,omitempty"`
+	Params      []ActionParam `json:"params,omitempty"`
+}
+
+// ActiveDecision is the read view of a decision currently in force.
+type ActiveDecision struct {
+	ID      string    `json:"id"`
+	Action  string    `json:"action"`
+	Scope   string    `json:"scope"`
+	Target  string    `json:"target"`
+	Reason  string    `json:"reason,omitempty"`
+	Actor   string    `json:"actor,omitempty"`
+	Created time.Time `json:"created"`
+	Expires time.Time `json:"expires,omitempty"`
+}
+
+// ActionDecision is the read view of one audited decision.
+type ActionDecision struct {
+	ID        string    `json:"id"`
+	Action    string    `json:"action"`
+	Label     string    `json:"label,omitempty"`
+	Scope     string    `json:"scope"`
+	Target    string    `json:"target"`
+	Actor     string    `json:"actor,omitempty"`
+	Reason    string    `json:"reason,omitempty"`
+	Operator  string    `json:"operator,omitempty"`
+	Status    string    `json:"status"`
+	RevertRef string    `json:"revert_ref,omitempty"`
+	Detail    string    `json:"detail,omitempty"`
+	StartedAt time.Time `json:"started_at"`
+	ExpiresAt time.Time `json:"expires_at,omitempty"`
+}
+
+// ActionsOutput is the action surface: what is available, what is in force, and
+// what has been decided. It is data, not markup — consumers render it however
+// they like.
+type ActionsOutput struct {
+	Capabilities []ActionCapability `json:"capabilities"`
+	Active       []ActiveDecision   `json:"active"`
+	Decisions    []ActionDecision   `json:"decisions"`
+}
+
+// ActorsInput filters the actors operation.
+type ActorsInput struct {
+	Suspicious bool `json:"suspicious,omitempty"` // only actors at/above the risk threshold
+	Limit      int  `json:"limit,omitempty"`      // top-N by risk (default 100)
+}
+
+// Actor is the read view of one aggregated actor.
+type Actor struct {
+	Key         string         `json:"key"`
+	IP          string         `json:"ip"`
+	Fingerprint string         `json:"tls_fingerprint,omitempty"`
+	UserAgent   string         `json:"user_agent,omitempty"`
+	Tags        []string       `json:"tags,omitempty"`
+	FirstSeen   time.Time      `json:"first_seen"`
+	LastSeen    time.Time      `json:"last_seen"`
+	Requests    int            `json:"requests"`
+	BySeverity  map[string]int `json:"by_severity"`
+	Verdicts    map[string]int `json:"verdicts"`
+	LastVerdict string         `json:"last_verdict,omitempty"`
+	LastSummary string         `json:"last_summary,omitempty"`
+	Risk        int            `json:"risk"`
+	Suspicious  bool           `json:"suspicious"`
+}
+
+// ActorsOutput is the actor surface: who is doing what, ordered by risk.
+type ActorsOutput struct {
+	Count      int     `json:"count"`
+	Suspicious int     `json:"suspicious"`
+	Actors     []Actor `json:"actors"`
+}
+
 // DashboardInput is unused; present for contract completeness.
 type DashboardInput struct{}
 
@@ -96,6 +192,22 @@ func AlertsMethod() author.Method[AlertsInput, AlertsOutput] {
 	}
 }
 
+// ActionsMethod returns the typed ext.plugin/v1 method for the actions op.
+func ActionsMethod() author.Method[ActionsInput, ActionsOutput] {
+	return author.Method[ActionsInput, ActionsOutput]{
+		Contract:  engine.ContractRef{Name: ContractName, Version: ContractVersion},
+		Operation: engine.Operation{Name: OpActions, Surface: "observation"},
+	}
+}
+
+// ActorsMethod returns the typed ext.plugin/v1 method for the actors op.
+func ActorsMethod() author.Method[ActorsInput, ActorsOutput] {
+	return author.Method[ActorsInput, ActorsOutput]{
+		Contract:  engine.ContractRef{Name: ContractName, Version: ContractVersion},
+		Operation: engine.Operation{Name: OpActors, Surface: "observation"},
+	}
+}
+
 // DashboardMethod returns the typed ext.plugin/v1 method for the dashboard op.
 func DashboardMethod() author.Method[DashboardInput, DashboardOutput] {
 	return author.Method[DashboardInput, DashboardOutput]{
@@ -104,17 +216,35 @@ func DashboardMethod() author.Method[DashboardInput, DashboardOutput] {
 	}
 }
 
-// Service implements the three operations. It reads from the core alert store
-// and never writes to it.
+// Service implements the observation operations. It reads from the core alert
+// store and an optional action view and never writes to either.
 type Service struct {
 	reader     alert.Reader
 	stats      func() QueueCounters
 	storeStats func() (stored, delivered, failed uint64)
+	actions    func() ActionsOutput
+	actors     func(ActorsInput) ActorsOutput
 }
 
 // NewService wires the obs service to an alert reader and optional counters.
 func NewService(reader alert.Reader, stats func() QueueCounters, storeStats func() (uint64, uint64, uint64)) *Service {
 	return &Service{reader: reader, stats: stats, storeStats: storeStats}
+}
+
+// SetActions attaches the action read view (capabilities + decisions). It is
+// optional: without it the actions operation returns empty lists.
+func (s *Service) SetActions(view func() ActionsOutput) {
+	if s != nil {
+		s.actions = view
+	}
+}
+
+// SetActors attaches the actor read view. Optional; without it the actors
+// operation returns empty lists.
+func (s *Service) SetActors(view func(ActorsInput) ActorsOutput) {
+	if s != nil {
+		s.actors = view
+	}
 }
 
 // Summary implements OpSummary.
@@ -154,15 +284,47 @@ func (s *Service) Alerts(_ context.Context, _ engine.Request, in AlertsInput) (A
 	return AlertsOutput{Count: len(recs), Alerts: recs}, nil
 }
 
+// Actions implements OpActions. It returns the action read view, or empty
+// lists when no action view is attached.
+func (s *Service) Actions(_ context.Context, _ engine.Request, _ ActionsInput) (ActionsOutput, error) {
+	var out ActionsOutput
+	if s != nil && s.actions != nil {
+		out = s.actions()
+	}
+	if out.Capabilities == nil {
+		out.Capabilities = []ActionCapability{}
+	}
+	if out.Active == nil {
+		out.Active = []ActiveDecision{}
+	}
+	if out.Decisions == nil {
+		out.Decisions = []ActionDecision{}
+	}
+	return out, nil
+}
+
+// Actors implements OpActors. It returns the actor read view, or empty lists
+// when no actor view is attached.
+func (s *Service) Actors(_ context.Context, _ engine.Request, in ActorsInput) (ActorsOutput, error) {
+	var out ActorsOutput
+	if s != nil && s.actors != nil {
+		out = s.actors(in)
+	}
+	if out.Actors == nil {
+		out.Actors = []Actor{}
+	}
+	return out, nil
+}
+
 // Dashboard implements OpDashboard.
 func (s *Service) Dashboard(_ context.Context, _ engine.Request, _ DashboardInput) (DashboardOutput, error) {
 	return DashboardOutput{HTML: s.renderDashboard()}, nil
 }
 
 // BuildGuest constructs the ext.plugin/v1 Guest for the obs plugin: it
-// registers the three typed operations on a Descriptor and returns the guest
-// plus descriptor, ready to back an in-process engine session (or be served
-// over jsonline as an out-of-process plugin).
+// registers the typed operations on a Descriptor and returns the guest plus
+// descriptor, ready to back an in-process engine session (or be served over
+// jsonline as an out-of-process plugin).
 func BuildGuest(svc *Service) (engine.Descriptor, *engine.Guest, error) {
 	if svc == nil {
 		return engine.Descriptor{}, nil, fmt.Errorf("obs: service is required")
@@ -175,6 +337,12 @@ func BuildGuest(svc *Service) (engine.Descriptor, *engine.Guest, error) {
 		return engine.Descriptor{}, nil, err
 	}
 	if err := author.Register(reg, AlertsMethod(), svc.Alerts); err != nil {
+		return engine.Descriptor{}, nil, err
+	}
+	if err := author.Register(reg, ActionsMethod(), svc.Actions); err != nil {
+		return engine.Descriptor{}, nil, err
+	}
+	if err := author.Register(reg, ActorsMethod(), svc.Actors); err != nil {
 		return engine.Descriptor{}, nil, err
 	}
 	if err := author.Register(reg, DashboardMethod(), svc.Dashboard); err != nil {
@@ -295,6 +463,18 @@ func (b *Bridge) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 		out, err := author.Call(ctx, b.session, AlertsMethod(), in)
+		writeJSON(w, out, err)
+	case path == "actions":
+		out, err := author.Call(ctx, b.session, ActionsMethod(), ActionsInput{})
+		writeJSON(w, out, err)
+	case path == "actors":
+		in := ActorsInput{Suspicious: r.URL.Query().Get("suspicious") == "true" || r.URL.Query().Get("suspicious") == "1"}
+		if v := r.URL.Query().Get("limit"); v != "" {
+			if n, err := strconv.Atoi(v); err == nil {
+				in.Limit = n
+			}
+		}
+		out, err := author.Call(ctx, b.session, ActorsMethod(), in)
 		writeJSON(w, out, err)
 	case path == "dashboard":
 		out, err := author.Call(ctx, b.session, DashboardMethod(), DashboardInput{})

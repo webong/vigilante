@@ -94,6 +94,9 @@ type Server struct {
 	relay    http.Handler
 	httpSrv  *http.Server
 	observed atomic.Uint64
+	// fingerprints records each TLS connection's ClientHello JA3 so mirrored
+	// events can carry the actor fingerprint.
+	fingerprints *tap.FingerprintStore
 	// extraMetrics, when set, appends additional metric lines to /metrics
 	// (e.g. alert store counters).
 	extraMetrics func(http.ResponseWriter)
@@ -164,7 +167,8 @@ func NewServer(opts Options, observe func(context.Context, agent.PacketEvent)) (
 	}
 	queue := tap.NewMirrorQueue(queueSize)
 
-	s := &Server{opts: opts, queue: queue}
+	s := &Server{opts: opts, queue: queue, fingerprints: tap.NewFingerprintStore()}
+	queue.SetFingerprints(s.fingerprints)
 	s.relay = s.buildRelay(forwardURL)
 
 	workers := opts.Workers
@@ -289,7 +293,7 @@ func (s *Server) ListenAndServe() error {
 		return nil
 	}
 	if s.opts.TLSCertFile != "" && s.opts.TLSKeyFile != "" {
-		s.httpSrv.TLSConfig = &tls.Config{MinVersion: tls.VersionTLS12}
+		s.httpSrv.TLSConfig = s.fingerprints.TLSConfig(&tls.Config{MinVersion: tls.VersionTLS12})
 		return s.httpSrv.ListenAndServeTLS(s.opts.TLSCertFile, s.opts.TLSKeyFile)
 	}
 	return s.httpSrv.ListenAndServe()

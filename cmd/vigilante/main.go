@@ -7,6 +7,7 @@ package main
 
 import (
 	"context"
+	"crypto/tls"
 	"encoding/json"
 	"flag"
 	"fmt"
@@ -34,6 +35,7 @@ import (
 	"github.com/webong/vigilante/ext/obs"
 	"github.com/webong/vigilante/ext/tap"
 	"github.com/webong/vigilante/internal/action"
+	"github.com/webong/vigilante/internal/actor"
 	"github.com/webong/vigilante/internal/alert"
 	"github.com/webong/vigilante/internal/block"
 	"github.com/webong/vigilante/internal/correlator"
@@ -77,6 +79,9 @@ func run(args []string, out io.Writer) error {
 	blockThreshold := fs.Int("block-threshold", 0, "Auto-block a source after N qualifying verdicts within -block-window (0 = disabled)")
 	blockWindow := fs.Duration("block-window", time.Minute, "Sliding window for -block-threshold")
 	blockMinSev := fs.String("block-min-severity", "high", "Lowest verdict severity counted toward -block-threshold")
+	actorWindow := fs.Duration("actor-window", 24*time.Hour, "Sliding window over which an actor's risk score is computed")
+	actorRiskThreshold := fs.Int("actor-risk-threshold", 50, "Risk score at or above which an actor is flagged suspicious")
+	actorMax := fs.Int("actor-max", 10000, "Maximum number of actors to retain before evicting the least recently seen")
 	actionAllow := fs.String("action-allow", "block", "Comma-separated action ids the host may execute; empty denies every action")
 	actionDryRun := fs.Bool("action-dry-run", false, "Force every action into dry-run: report what would happen, enforce nothing")
 	actionTTL := fs.Duration("action-ttl", time.Hour, "Default lifetime of an applied action before it is reverted")
@@ -172,11 +177,14 @@ func run(args []string, out io.Writer) error {
 	applyInt(set["block-threshold"], blockThreshold, cfg.BlockThreshold)
 	applyInt(set["alert-keep"], alertKeep, cfg.AlertKeep)
 	applyInt(set["queue-size"], queueSize, cfg.QueueSize)
+	applyInt(set["actor-risk-threshold"], actorRiskThreshold, cfg.ActorRiskThreshold)
+	applyInt(set["actor-max"], actorMax, cfg.ActorMax)
 	applyInt64(set["alert-max-bytes"], alertMaxBytes, cfg.AlertMaxBytes)
 	applyDur(set["block-window"], blockWindow, cfg.BlockWindow)
 	applyDur(set["agent-timeout"], agentTimeout, cfg.AgentTimeout)
 	applyDur(set["action-ttl"], actionTTL, cfg.ActionTTL)
 	applyDur(set["action-max-ttl"], actionMaxTTL, cfg.ActionMaxTTL)
+	applyDur(set["actor-window"], actorWindow, cfg.ActorWindow)
 	if !set["sample-rate"] && cfg.SampleRate > 0 {
 		*sampleRate = cfg.SampleRate
 	}
@@ -397,6 +405,14 @@ func run(args []string, out io.Writer) error {
 		fmt.Fprintf(out, "[vigilante] alert store active: %s (deliver: %s)\n", path, orDash(*alertDeliver))
 	}
 
+	// The actor index aggregates flows into per-actor risk. It is the stateful
+	// counterpart to the stateless core, consumed as data (see /obs/actors).
+	var actorIdx *actor.Index
+	if alertStore != nil {
+		actorIdx = actor.NewIndex(*actorWindow, *actorMax)
+		actorIdx.SetRiskThreshold(*actorRiskThreshold)
+	}
+
 	// Open the obs ext plugin (dashboard + query API) whenever an alert store
 	// exists. It reads alerts via the store's Reader; metrics flow into /metrics.
 	var obsBridge *obs.Bridge
@@ -408,6 +424,11 @@ func run(args []string, out io.Writer) error {
 			obsQueueStats(obsQueueProbe),
 			alertStore.Stats,
 		)
+		// Expose the action surface as data (capabilities + active decisions +
+		// audit) for any consumer to render. Vigilante ships no UI.
+		obsSvc.SetActions(func() obs.ActionsOutput { return actionView(registry) })
+		// Expose the actor surface as data for any consumer to render.
+		obsSvc.SetActors(func(in obs.ActorsInput) obs.ActorsOutput { return actorView(actorIdx, in) })
 		_, bridge, closeFn, oerr := obs.Open(ctx, obsSvc)
 		if oerr != nil {
 			return fmt.Errorf("open obs plugin: %w", oerr)
@@ -423,16 +444,19 @@ func run(args []string, out io.Writer) error {
 				fmt.Fprintf(w, "vigilante_alerts_by_severity{severity=%q} %d\n", string(sev), n)
 			}
 		}
-		fmt.Fprintln(out, "[vigilante] obs plugin active: /obs/dashboard, /obs/alerts, /obs/summary (ext.plugin/v1 vigilante.obs@v1)")
+		fmt.Fprintln(out, "[vigilante] obs plugin active: /obs/dashboard, /obs/alerts, /obs/summary, /obs/actions, /obs/actors (ext.plugin/v1 vigilante.obs@v1)")
 	}
 
 	// Flow publication: the stateless core hands each triaged flow to a bounded
 	// fan-out. Sinks never backpressure live traffic; a full queue drops and
-	// counts. The alert store is the baseline sink; a stateful console is just
-	// another Sink.
+	// counts. The alert store is the baseline sink; the actor index is the
+	// stateful aggregation sink; a custom console is another Sink.
 	var publisher *flow.Publisher
 	if alertStore != nil {
-		publisher = flow.NewPublisher([]flow.Sink{flow.AlertSink{Store: alertStore}}, *queueSize, 2)
+		publisher = flow.NewPublisher([]flow.Sink{
+			flow.AlertSink{Store: alertStore},
+			actorIdx,
+		}, *queueSize, 2)
 		defer func() {
 			cctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 			defer cancel()
@@ -440,7 +464,7 @@ func run(args []string, out io.Writer) error {
 				fmt.Fprintln(out, "[vigilante] flow publisher:", err)
 			}
 		}()
-		fmt.Fprintln(out, "[vigilante] flow publisher active (sink: alert store)")
+		fmt.Fprintln(out, "[vigilante] flow publisher active (sinks: alert store, actor index)")
 	}
 
 	var gw *agent.Gateway
@@ -502,6 +526,7 @@ func run(args []string, out io.Writer) error {
 					SrcAddr:         env.Event.SrcAddr,
 					TargetAddr:      env.Event.TargetAddr,
 					UserAgent:       headerValue(env.Event.Headers, "User-Agent"),
+					TLSFingerprint:  env.Event.TLSFingerprint,
 					Handler:         v.MatchedHandler,
 					Advisories:      v.MatchedAdvisories,
 					Recommendations: v.Recommendations,
@@ -629,11 +654,16 @@ func runMiddlewareMode(ctx context.Context, out io.Writer, corr *correlator.Corr
 	queue.Drain(ctx, 2, func(ctx context.Context, ev agent.PacketEvent) {
 		_, _ = corr.ProcessPacket(ctx, ev)
 	})
+	fps := tap.NewFingerprintStore()
+	queue.SetFingerprints(fps)
 
 	handler := withStatus(
 		tap.HTTPMiddlewareGate(httputil.NewSingleHostReverseProxy(targetURL), queue, listenAddr, targetURL.Host, gate),
 		queue, alertStatsOf(alertStore), obsB, obsM)
 	srv := &http.Server{Addr: listenAddr, Handler: handler}
+	if tlsCert != "" && tlsKey != "" {
+		srv.TLSConfig = fps.TLSConfig(&tls.Config{MinVersion: tls.VersionTLS12})
+	}
 
 	go func() {
 		<-ctx.Done()
@@ -829,6 +859,118 @@ func orNever(t time.Time) string {
 	return t.Format(time.RFC3339)
 }
 
+// actorView adapts the actor index into the obs read model, applying the
+// suspicious filter and top-N limit.
+func actorView(idx *actor.Index, in obs.ActorsInput) obs.ActorsOutput {
+	out := obs.ActorsOutput{Actors: []obs.Actor{}}
+	if idx == nil {
+		return out
+	}
+	limit := in.Limit
+	if limit <= 0 {
+		limit = 100
+	}
+	snap := idx.Snapshot()
+	suspicious := 0
+	for _, a := range snap {
+		if a.Suspicious {
+			suspicious++
+		}
+	}
+	out.Count = len(snap)
+	out.Suspicious = suspicious
+	for _, a := range snap {
+		if in.Suspicious && !a.Suspicious {
+			continue
+		}
+		out.Actors = append(out.Actors, obs.Actor{
+			Key:         a.Key,
+			IP:          a.IP,
+			Fingerprint: a.Fingerprint,
+			UserAgent:   a.UserAgent,
+			Tags:        a.Tags,
+			FirstSeen:   a.FirstSeen,
+			LastSeen:    a.LastSeen,
+			Requests:    a.Requests,
+			BySeverity:  a.BySeverity,
+			Verdicts:    a.Verdicts,
+			LastVerdict: a.LastVerdict,
+			LastSummary: a.LastSummary,
+			Risk:        a.Risk,
+			Suspicious:  a.Suspicious,
+		})
+		if len(out.Actors) >= limit {
+			break
+		}
+	}
+	return out
+}
+
+// actionView adapts the host action registry into the obs read model. It is the
+// data any consumer needs to render a response UI: what is available, what is
+// in force, and what has been decided.
+func actionView(r *action.Registry) obs.ActionsOutput {
+	out := obs.ActionsOutput{
+		Capabilities: []obs.ActionCapability{},
+		Active:       []obs.ActiveDecision{},
+		Decisions:    []obs.ActionDecision{},
+	}
+	if r == nil {
+		return out
+	}
+	for _, c := range r.Capabilities() {
+		scopes := make([]string, len(c.Scopes))
+		for i, s := range c.Scopes {
+			scopes[i] = string(s)
+		}
+		params := make([]obs.ActionParam, len(c.Params))
+		for i, p := range c.Params {
+			params[i] = obs.ActionParam{Name: p.Name, Label: p.Label, Type: p.Type, Required: p.Required, Default: p.Default}
+		}
+		out.Capabilities = append(out.Capabilities, obs.ActionCapability{
+			ID:          c.ID,
+			Label:       c.Label,
+			Description: c.Description,
+			Scopes:      scopes,
+			DefaultTTL:  c.DefaultTTL,
+			MaxTTL:      c.MaxTTL,
+			Reversible:  c.Reversible,
+			Destructive: c.Destructive,
+			Params:      params,
+		})
+	}
+	for _, e := range r.Active() {
+		out.Active = append(out.Active, obs.ActiveDecision{
+			ID:      e.ID,
+			Action:  e.Action,
+			Scope:   string(e.Scope),
+			Target:  e.Target,
+			Reason:  e.Reason,
+			Actor:   e.Actor,
+			Created: e.Created,
+			Expires: e.Expires,
+		})
+	}
+	for _, d := range r.Decisions() {
+		out.Decisions = append(out.Decisions, obs.ActionDecision{
+			ID:        d.ID,
+			Action:    d.Action,
+			Label:     d.Label,
+			Scope:     string(d.Scope),
+			Target:    d.Target,
+			Actor:     d.Actor,
+			Reason:    d.Reason,
+			Operator:  d.Operator,
+			Status:    string(d.Status),
+			RevertRef: d.RevertRef,
+			Detail:    d.Detail,
+			StartedAt: d.StartedAt,
+			ExpiresAt: d.ExpiresAt,
+		})
+	}
+	return out
+}
+
 // headerValue looks up a header case-insensitively in a mirrored header map.
 func headerValue(headers map[string]string, name string) string {
 	for k, v := range headers {
@@ -954,12 +1096,17 @@ func runHTTPProxy(ctx context.Context, out io.Writer, corr *correlator.Correlato
 	queue.Drain(ctx, 2, func(ctx context.Context, ev agent.PacketEvent) {
 		_, _ = corr.ProcessPacket(ctx, ev)
 	})
+	fps := tap.NewFingerprintStore()
+	queue.SetFingerprints(fps)
 
 	srv := &http.Server{
 		Addr: listenAddr,
 		Handler: withStatus(
 			tap.HTTPMiddlewareGate(tap.NewHTTPReverseProxyTap(targetURL, queue, listenAddr), queue, listenAddr, targetURL.Host, gate),
 			queue, alertStatsOf(alertStore), obsB, obsM),
+	}
+	if tlsCert != "" && tlsKey != "" {
+		srv.TLSConfig = fps.TLSConfig(&tls.Config{MinVersion: tls.VersionTLS12})
 	}
 
 	go func() {

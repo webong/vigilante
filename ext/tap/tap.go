@@ -20,6 +20,7 @@ import (
 
 	"github.com/webong/vigilante/ext/agent"
 	"github.com/webong/vigilante/ext/redact"
+	"github.com/webong/vigilante/ext/tlsfp"
 )
 
 // PacketEvent is re-exported from ext/agent so tap producers and the sensor
@@ -85,6 +86,9 @@ type MirrorQueue struct {
 	// "mirror everything" (unset). Uses atomic float bits for lock-free reads.
 	sampleRate atomic.Uint64 // math.Float64bits, 0 = unset (treat as 1.0)
 	sampledOut atomic.Uint64
+	// fingerprints, when set, lets mirrored HTTP events carry the connection's
+	// TLS ClientHello JA3 fingerprint (populated by the TLS terminator).
+	fingerprints *FingerprintStore
 }
 
 // NewMirrorQueue allocates a bounded asynchronous packet mirror queue.
@@ -149,6 +153,14 @@ func (q *MirrorQueue) Stats() (queued, dropped uint64) {
 
 // SampledOut returns how many events were skipped by the sample filter.
 func (q *MirrorQueue) SampledOut() uint64 { return q.sampledOut.Load() }
+
+// SetFingerprints attaches a TLS fingerprint store so mirrored HTTP events can
+// carry the connection's ClientHello JA3 fingerprint.
+func (q *MirrorQueue) SetFingerprints(f *FingerprintStore) {
+	if q != nil {
+		q.fingerprints = f
+	}
+}
 
 // Drain runs worker goroutines that consume mirrored events and pass them to fn.
 func (q *MirrorQueue) Drain(ctx context.Context, workers int, fn func(context.Context, agent.PacketEvent)) {
@@ -243,6 +255,9 @@ func PreviewRequest(queue *MirrorQueue, r *http.Request, listenAddr, targetAddr 
 		Headers:        headers,                // sensitive headers already [REDACTED]
 		PayloadPreview: redact.String(preview), // scrub secrets from body preview
 		PayloadBytes:   totalBytes,
+	}
+	if queue != nil && queue.fingerprints != nil {
+		ev.TLSFingerprint = queue.fingerprints.Lookup(r.RemoteAddr)
 	}
 	// Scrub secrets from the query string while preserving its structure.
 	if q := r.URL.RawQuery; q != "" {
@@ -352,7 +367,7 @@ func enqueueTCP(queue *MirrorQueue, listenAddr, targetAddr, remoteAddr string, p
 	if n > 0 {
 		preview = redact.String(string(payload))
 	}
-	queue.Enqueue(agent.PacketEvent{
+	ev := agent.PacketEvent{
 		Timestamp:      time.Now().UTC(),
 		Protocol:       "tcp",
 		SrcAddr:        remoteAddr,
@@ -360,7 +375,14 @@ func enqueueTCP(queue *MirrorQueue, listenAddr, targetAddr, remoteAddr string, p
 		TargetAddr:     targetAddr,
 		PayloadPreview: preview,
 		PayloadBytes:   n,
-	})
+	}
+	// If this stream opens with a TLS ClientHello, fingerprint the actor.
+	if n > 0 {
+		if hello, ok := tlsfp.ParseClientHello(payload[:n]); ok {
+			ev.TLSFingerprint = hello.JA3()
+		}
+	}
+	queue.Enqueue(ev)
 }
 
 // hostOnly strips the port from an addr, leaving the IP.

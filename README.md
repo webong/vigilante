@@ -182,9 +182,38 @@ Every verdict is appended to a rotating JSONL store, and optionally POSTed to a 
 -alert-min-severity high
 ```
 
-## Dashboard & metrics
+## Data API & metrics
 
-With an alert store present (default via `-obs`), the obs plugin serves `GET /obs/dashboard` (HTML), `/obs/alerts`, and `/obs/summary`. Every HTTP-serving mode exposes `GET /healthz`, `/ready`, and `/metrics`.
+Vigilante ships data, not a UI. With an alert store present (default via
+`-obs`), the obs plugin serves JSON and Prometheus text for anyone to build on;
+the HTML dashboard is a sample, not the product. See
+[`docs/adr/0003`](docs/adr/0003-api-first-data-not-ui.md).
+
+| Endpoint | Returns |
+| --- | --- |
+| `GET /obs/alerts?severity=&limit=` | Recent alerts, newest first. |
+| `GET /obs/summary` | Severity counts, queue counters, stored/delivered/failed. |
+| `GET /obs/actions` | Action capabilities, active decisions, and the decision audit. |
+| `GET /obs/actors?suspicious=&limit=` | Actors aggregated from flows: key (IP + TLS fingerprint), first/last seen, request counts, severity rollups, verdicts, tags, and a decaying risk score. |
+| `GET /obs/dashboard` | Sample HTML that renders the same data as `/obs/alerts`. |
+| `GET /metrics` | Prometheus text (queue, redaction, alert, severity counters). |
+| `GET /healthz` `/ready` | Liveness and readiness. |
+
+Actors are the stateful counterpart to the stateless core: the actor index is a
+`flow.Sink` that folds every triaged flow into a bounded, in-memory view. Risk is
+a transparent, decaying score — each flow adds severity-weighted points that age
+out of a sliding window (`-actor-window`), and an actor is flagged suspicious at
+`-actor-risk-threshold`. The `ai-agent`, `path-traversal`, `injection`, and `cve`
+tags are derived from the verdict and user agent, not stored by hand.
+
+Actors are keyed by address **and TLS ClientHello fingerprint (JA3)** when one is
+available, so look-alike clients behind a NAT stay distinct. The fingerprint is
+captured in the TLS-terminating modes (http/gateway/middleware with a cert) from
+the parsed ClientHello, and from the raw ClientHello on the TCP tee.
+
+The same data is available over `ext.plugin/v1` RPC (`vigilante.obs@v1`:
+`summary`, `alerts`, `actions`, `dashboard`), so an out-of-process consumer can
+run exactly like the agent does under `-agent supervised`.
 
 Triaged flows are published to a bounded fan-out (`internal/flow`). The alert
 store is the baseline sink; a stateful console is another `Sink` and never
