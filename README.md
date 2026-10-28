@@ -46,6 +46,7 @@ Linux (`AF_PACKET`), macOS (system `tcpdump`), and Windows (npcap `Packet.dll`) 
 | `middleware` | Embed the tap inside an existing Go HTTP handler. |
 | `gateway` | Own the listener (`local`) or attach to an ingress elsewhere (`external:<url>`). |
 | `passive` | Observe interface traffic without being in the forwarding path. |
+| `sidecar` | HTTP decision API (`/v1/decide`, `/v1/check`, `/v1/observe`) for proxy plugins. |
 
 ## Pointing at your codebase
 
@@ -125,16 +126,51 @@ deny_cidrs:
 rules:
   - name: block-admin
     action: deny            # 403, not mirrored
-    paths: [/admin/*]
+    paths:
+      - /admin/*
   - name: block-git
     action: block           # mirrored for triage, then 403 + source block
-    path_prefixes: ["/.git/"]
+    path_prefixes:
+      - /.git/
   - name: allow-health
     action: allow
-    paths: [/healthz]
+    paths:
+      - /healthz
 ```
 
 Rules match on `methods`, `hosts`, `paths` (glob), `path_prefixes`, and `cidrs`. `block` verdicts are enforced via `-block-mode log` (dry-run, default), `iptables`, or `nft`. Auto-block a source after repeated bad verdicts with `-block-threshold N -block-window 1m -block-min-severity high`.
+
+## Actions
+
+Detection is only half the job; an action is what the host is allowed to *do*
+about it. Actions are pluggable, allowlisted, audited, and always time-bounded.
+
+| Action | What it does |
+| --- | --- |
+| `block` (built-in) | Drops the source at the host firewall (`log`/`iptables`/`nft`). |
+| `notify` (remote) | Calls any HTTP API — a WAF, load balancer, ticketing system, on-call pager — with a templated request. |
+
+```sh
+-action-allow block,notify     # only these ids may run; empty denies everything
+-action-dry-run                # report what would happen, enforce nothing
+-action-ttl 1h                 # default lifetime before the action is reverted
+-action-max-ttl 24h            # host ceiling on any lifetime
+-action-webhook https://api.cloudflare.com/client/v4/zones/$ZONE/rulesets/$ID/rules
+-action-webhook-revert https://api.cloudflare.com/client/v4/zones/$ZONE/rulesets/$ID/rules/{ref}
+-action-webhook-token "$CF_TOKEN"
+```
+
+Remote URLs and bodies are templates over `{target}`, `{scope}`, `{action}`,
+`{reason}`, `{ttl}`, and `{ref}`. A create response may return `{"id": "..."}`
+or `{"revert_ref": "..."}`; that handle is passed back as `{ref}` when the
+decision expires or an operator reverts it. Nothing is hardcoded in the core, so
+the same path covers a WAF rule, a load-balancer deny list, or a Slack message.
+
+Applied decisions are pushed into an in-memory, TTL-bounded snapshot that the
+request gate consults inline. Expired decisions are reverted automatically; a
+crashed console can never leave a rule pinned forever. See
+[`docs/adr/0001`](docs/adr/0001-stateless-core-stateful-plugins.md) for why the
+core stays stateless and where state lives instead.
 
 ## Alerts
 
@@ -149,6 +185,10 @@ Every verdict is appended to a rotating JSONL store, and optionally POSTed to a 
 ## Dashboard & metrics
 
 With an alert store present (default via `-obs`), the obs plugin serves `GET /obs/dashboard` (HTML), `/obs/alerts`, and `/obs/summary`. Every HTTP-serving mode exposes `GET /healthz`, `/ready`, and `/metrics`.
+
+Triaged flows are published to a bounded fan-out (`internal/flow`). The alert
+store is the baseline sink; a stateful console is another `Sink` and never
+backpressures live traffic — a full queue drops and counts.
 
 ## Redaction & sampling
 
@@ -169,8 +209,26 @@ docker build -f vigilante/Dockerfile -t vigilante:latest .
 docker run -p 8080:8080 -v /var/log/vigilante:/var/log/vigilante vigilante:latest
 ```
 
-## Embed in your Go service
+## Inside your edge proxy
 
+Run Vigilante as a plugin in the proxy you already operate, in [`pkg/`](pkg):
+
+| Proxy | Integration |
+| --- | --- |
+| **Caddy** | Native module `http.handlers.vigilante` — `xcaddy build --with github.com/webong/vigilante/pkg/caddy` |
+| **Traefik** | Yaegi middleware plugin, talking to `-mode sidecar` |
+| **nginx** | `auth_request` + `mirror`, or an njs handler, talking to `-mode sidecar` |
+
+```sh
+# Decision API used by the Traefik and nginx plugins:
+vigilante -mode sidecar -sidecar-listen 127.0.0.1:9090 \
+  -target http://127.0.0.1:3000 -policy /etc/vigilante/policy.yaml
+```
+
+All three share the same policy engine, so rules behave identically. See
+[`pkg/README.md`](pkg/README.md) for per-proxy setup.
+
+## Embed in your Go service
 ```go
 queue := tap.NewMirrorQueue(256)
 queue.Drain(ctx, 2, func(ctx context.Context, ev agent.PacketEvent) {

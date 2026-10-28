@@ -28,17 +28,24 @@ import (
 	"github.com/webong/ext/res/system"
 	"github.com/webong/ext/res/system/graph"
 	"github.com/webong/ext/res/system/supervisor"
+	blockaction "github.com/webong/vigilante/ext/action/block"
+	"github.com/webong/vigilante/ext/action/remote"
 	"github.com/webong/vigilante/ext/agent"
 	"github.com/webong/vigilante/ext/obs"
 	"github.com/webong/vigilante/ext/tap"
+	"github.com/webong/vigilante/internal/action"
 	"github.com/webong/vigilante/internal/alert"
 	"github.com/webong/vigilante/internal/block"
 	"github.com/webong/vigilante/internal/correlator"
+	"github.com/webong/vigilante/internal/decision"
+	"github.com/webong/vigilante/internal/flow"
+	policygate "github.com/webong/vigilante/internal/gate"
 	"github.com/webong/vigilante/internal/gateway"
 	"github.com/webong/vigilante/internal/policy"
 	"github.com/webong/vigilante/internal/repo"
 	"github.com/webong/vigilante/internal/schema"
 	"github.com/webong/vigilante/internal/status"
+	"github.com/webong/vigilante/pkg/ingress"
 )
 
 func main() {
@@ -52,11 +59,12 @@ func run(args []string, out io.Writer) error {
 	fs := flag.NewFlagSet("vigilante", flag.ContinueOnError)
 	fs.SetOutput(out)
 
-	mode := fs.String("mode", "demo", "Execution mode: demo, http, tcp, middleware, gateway, passive, or agent-worker")
+	mode := fs.String("mode", "demo", "Execution mode: demo, http, tcp, middleware, gateway, passive, sidecar, or agent-worker")
 	passiveIface := fs.String("passive-iface", "", "Interface to passively sniff in -mode passive (e.g. eth0; requires root/CAP_NET_RAW)")
 	passivePorts := fs.String("passive-ports", "", "Comma-separated ports to capture in -mode passive (empty = all)")
 	listenAddr := fs.String("listen", "127.0.0.1:8080", "Address for vigilante middleware to listen on")
-	targetAddr := fs.String("target", "http://127.0.0.1:9000", "Upstream server URL (for http/gateway) or host:port (for tcp)")
+	sidecarListen := fs.String("sidecar-listen", "127.0.0.1:9090", "Listen address for -mode sidecar (ingress decision API: /v1/decide, /v1/check, /v1/observe)")
+	targetAddr := fs.String("target", "http://127.0.0.1:9000", "Upstream server URL (for http/gateway/sidecar) or host:port (for tcp)")
 	tlsCert := fs.String("tls-cert", "", "TLS certificate file for HTTPS on -listen (http/gateway modes)")
 	tlsKey := fs.String("tls-key", "", "TLS private key file for HTTPS on -listen (http/gateway modes)")
 	plannerURL := fs.String("planner-url", "", "Optional upstream gateway/route-planner URL for route decisions (gateway mode)")
@@ -69,6 +77,14 @@ func run(args []string, out io.Writer) error {
 	blockThreshold := fs.Int("block-threshold", 0, "Auto-block a source after N qualifying verdicts within -block-window (0 = disabled)")
 	blockWindow := fs.Duration("block-window", time.Minute, "Sliding window for -block-threshold")
 	blockMinSev := fs.String("block-min-severity", "high", "Lowest verdict severity counted toward -block-threshold")
+	actionAllow := fs.String("action-allow", "block", "Comma-separated action ids the host may execute; empty denies every action")
+	actionDryRun := fs.Bool("action-dry-run", false, "Force every action into dry-run: report what would happen, enforce nothing")
+	actionTTL := fs.Duration("action-ttl", time.Hour, "Default lifetime of an applied action before it is reverted")
+	actionMaxTTL := fs.Duration("action-max-ttl", 24*time.Hour, "Host ceiling on any action's lifetime")
+	actionWebhook := fs.String("action-webhook", "", "Optional remote action endpoint (e.g. a WAF API); enables the notify action")
+	actionWebhookBody := fs.String("action-webhook-body", "", "JSON body template for -action-webhook ({target},{scope},{reason},{ttl})")
+	actionWebhookRevert := fs.String("action-webhook-revert", "", "Revert URL template for -action-webhook ({ref}) so expiring decisions undo themselves")
+	actionWebhookToken := fs.String("action-webhook-token", "", "Bearer token sent to -action-webhook (prefer the config file over argv)")
 	alertFile := fs.String("alert-file", "", "Path to the JSONL alert store (enables persistence; rotated by size)")
 	alertMinSev := fs.String("alert-min-severity", "", "Minimum verdict severity to record/deliver: info, low, medium, high, critical")
 	alertDeliver := fs.String("alert-deliver-url", "", "Webhook URL to POST alerts to (direct when no planner is configured)")
@@ -126,6 +142,7 @@ func run(args []string, out io.Writer) error {
 	applyStr(set["agent"], agentKind, cfg.Agent)
 	applyStr(set["gateway"], gatewayPosture, cfg.Gateway)
 	applyStr(set["listen"], listenAddr, cfg.Listen)
+	applyStr(set["sidecar-listen"], sidecarListen, cfg.SidecarListen)
 	applyStr(set["target"], targetAddr, cfg.Target)
 	applyStr(set["repo"], repoTarget, cfg.Repo)
 	applyStr(set["repo-ref"], repoRef, cfg.RepoRef)
@@ -140,6 +157,11 @@ func run(args []string, out io.Writer) error {
 	applyStr(set["block-mode"], blockMode, cfg.BlockMode)
 	applyStr(set["block-chain"], blockChain, cfg.BlockChain)
 	applyStr(set["block-min-severity"], blockMinSev, cfg.BlockMinSeverity)
+	applyStr(set["action-allow"], actionAllow, cfg.ActionAllow)
+	applyStr(set["action-webhook"], actionWebhook, cfg.ActionWebhook)
+	applyStr(set["action-webhook-body"], actionWebhookBody, cfg.ActionWebhookBody)
+	applyStr(set["action-webhook-revert"], actionWebhookRevert, cfg.ActionWebhookRevert)
+	applyStr(set["action-webhook-token"], actionWebhookToken, cfg.ActionWebhookToken)
 	applyStr(set["alert-file"], alertFile, cfg.AlertFile)
 	applyStr(set["alert-deliver-url"], alertDeliver, cfg.AlertDeliver)
 	applyStr(set["alert-min-severity"], alertMinSev, cfg.AlertMinSeverity)
@@ -153,11 +175,16 @@ func run(args []string, out io.Writer) error {
 	applyInt64(set["alert-max-bytes"], alertMaxBytes, cfg.AlertMaxBytes)
 	applyDur(set["block-window"], blockWindow, cfg.BlockWindow)
 	applyDur(set["agent-timeout"], agentTimeout, cfg.AgentTimeout)
+	applyDur(set["action-ttl"], actionTTL, cfg.ActionTTL)
+	applyDur(set["action-max-ttl"], actionMaxTTL, cfg.ActionMaxTTL)
 	if !set["sample-rate"] && cfg.SampleRate > 0 {
 		*sampleRate = cfg.SampleRate
 	}
 	if !set["obs"] && cfg.Obs != nil {
 		*obsEnabled = *cfg.Obs
+	}
+	if !set["action-dry-run"] && cfg.ActionDryRun != nil {
+		*actionDryRun = *cfg.ActionDryRun
 	}
 	if !set["supervised-agent"] && cfg.Supervised {
 		*supervisedAgent = true
@@ -230,7 +257,13 @@ func run(args []string, out io.Writer) error {
 			snap.FileCount, len(snap.Routes), len(snap.Sinks), snap.Commit, shortHash(snap.TreeDigest))
 	}
 
+	// The enforcement snapshot the request path reads. Stateful consumers
+	// (operators, a console plugin, remote actions) write into it; entries are
+	// always time-bounded, so a dead writer cannot pin a rule forever.
+	decisions := decision.NewSet()
+
 	var polGate tap.PolicyGate
+	var polEngine *policy.Engine
 	var enforcer *block.Enforcer
 	var threshold *block.Threshold
 	if *policyFile != "" {
@@ -238,11 +271,15 @@ func run(args []string, out io.Writer) error {
 		if err != nil {
 			return err
 		}
+		polEngine = engine
 		fmt.Fprintf(out, "[vigilante] policy loaded from %s\n", *policyFile)
 		polGate = func(r *http.Request) string {
 			return string(engine.Evaluate(r).Action)
 		}
 	}
+	// Static policy first, then the live snapshot. The snapshot can only make
+	// the outcome stricter, never loosen a configured rule.
+	polGate = policygate.New(policygate.Options{Policy: polGate, Set: decisions})
 	{
 		var err error
 		enforcer, err = block.New(block.Options{
@@ -250,6 +287,9 @@ func run(args []string, out io.Writer) error {
 			Chain: *blockChain,
 			OnBlock: func(ip net.IP, rule string) {
 				fmt.Fprintf(out, "[vigilante] BLOCK enforced (%s) ip=%s rule=%s\n", *blockMode, ip, rule)
+			},
+			OnUnblock: func(ip net.IP) {
+				fmt.Fprintf(out, "[vigilante] BLOCK reverted (%s) ip=%s\n", *blockMode, ip)
 			},
 		})
 		if err != nil {
@@ -265,6 +305,71 @@ func run(args []string, out io.Writer) error {
 				*blockThreshold, *blockMinSev, *blockWindow)
 		}
 	}
+
+	// The action registry is the host's response authority. Only the ids in
+	// -action-allow may run, every decision is audited, and every applied
+	// decision is pushed into the snapshot the gate reads.
+	registry := action.New(action.Options{
+		Set:        decisions,
+		Allow:      splitCSV(*actionAllow),
+		DryRun:     *actionDryRun,
+		DefaultTTL: *actionTTL,
+		MaxTTL:     *actionMaxTTL,
+		OnDecision: func(d action.Decision) {
+			fmt.Fprintf(out, "[vigilante] ACTION %s %s scope=%s target=%s decision=%s expires=%s %s\n",
+				d.Action, d.Status, d.Scope, d.Target, d.ID,
+				orNever(d.ExpiresAt), orDash(d.Detail))
+		},
+		OnRevert: func(d action.Decision, err error) {
+			if err != nil {
+				fmt.Fprintf(out, "[vigilante] ACTION revert failed %s: %v\n", d.ID, err)
+				return
+			}
+			fmt.Fprintf(out, "[vigilante] ACTION reverted %s (%s %s)\n", d.ID, d.Action, d.Target)
+		},
+	})
+	if ba := blockaction.New(enforcer); ba != nil {
+		if err := registry.Register(ba); err != nil {
+			return err
+		}
+	}
+	if *actionWebhook != "" {
+		headers := map[string]string{}
+		if *actionWebhookToken != "" {
+			headers["Authorization"] = "Bearer " + *actionWebhookToken
+		}
+		re, err := remote.New(remote.Options{
+			ID:           "notify",
+			Label:        "Notify / remote action",
+			Description:  "Call an external API (WAF, load balancer, ticketing, on-call) to respond to this flow.",
+			Scopes:       []decision.Scope{decision.ScopeIP, decision.ScopeCIDR, decision.ScopeActor, decision.ScopeFingerprint},
+			URL:          *actionWebhook,
+			BodyTemplate: *actionWebhookBody,
+			RevertURL:    *actionWebhookRevert,
+			Headers:      headers,
+			DefaultTTL:   *actionTTL,
+			MaxTTL:       *actionMaxTTL,
+			Destructive:  true,
+		})
+		if err != nil {
+			return err
+		}
+		if err := registry.Register(re); err != nil {
+			return err
+		}
+	}
+	stopReaper := registry.StartReaper(ctx, 30*time.Second)
+	defer stopReaper()
+	caps := make([]string, 0, len(registry.Capabilities()))
+	for _, c := range registry.Capabilities() {
+		state := "available"
+		if !registry.Allowed(c.ID) {
+			state = "registered, not allowed"
+		}
+		caps = append(caps, c.ID+" ("+state+")")
+	}
+	fmt.Fprintf(out, "[vigilante] actions: allow=%v dry-run=%v ttl=%s max=%s capabilities=[%s]\n",
+		splitCSV(*actionAllow), *actionDryRun, *actionTTL, *actionMaxTTL, strings.Join(caps, ", "))
 
 	var alertStore *alert.Store
 	if *alertFile != "" || *alertDeliver != "" {
@@ -321,6 +426,23 @@ func run(args []string, out io.Writer) error {
 		fmt.Fprintln(out, "[vigilante] obs plugin active: /obs/dashboard, /obs/alerts, /obs/summary (ext.plugin/v1 vigilante.obs@v1)")
 	}
 
+	// Flow publication: the stateless core hands each triaged flow to a bounded
+	// fan-out. Sinks never backpressure live traffic; a full queue drops and
+	// counts. The alert store is the baseline sink; a stateful console is just
+	// another Sink.
+	var publisher *flow.Publisher
+	if alertStore != nil {
+		publisher = flow.NewPublisher([]flow.Sink{flow.AlertSink{Store: alertStore}}, *queueSize, 2)
+		defer func() {
+			cctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+			defer cancel()
+			if err := publisher.Close(cctx); err != nil {
+				fmt.Fprintln(out, "[vigilante] flow publisher:", err)
+			}
+		}()
+		fmt.Fprintln(out, "[vigilante] flow publisher active (sink: alert store)")
+	}
+
 	var gw *agent.Gateway
 	// Resolve the agent kind: explicit -agent wins; -supervised-agent maps to
 	// "supervised"; empty means builtin.
@@ -365,31 +487,44 @@ func run(args []string, out io.Writer) error {
 		FallbackPID: os.Getpid(),
 		OnVerdict: func(env agent.EnrichedEnvelope, v agent.Verdict) {
 			printVerdict(out, env, v)
-			// Persist/deliver the alert (Vigilante-owned; through the Gateway
-			// Planner when one is configured).
-			if alertStore != nil {
-				alertStore.Record(alert.Record{
-					Timestamp:  time.Now().UTC(),
-					FlowID:     v.FlowID,
-					Severity:   alert.Severity(v.Severity),
-					Action:     v.Action,
-					Summary:    v.Summary,
-					Method:     env.Event.Method,
-					Path:       env.Event.Path,
-					SrcAddr:    env.Event.SrcAddr,
-					TargetAddr: env.Event.TargetAddr,
-					Handler:    v.MatchedHandler,
-					Advisories: v.MatchedAdvisories,
+			// Publish the triaged flow to every sink (alert store, consoles,
+			// exporters). Publication is non-blocking: a slow sink can never
+			// stall traffic or triage.
+			if publisher != nil {
+				publisher.Publish(flow.Event{
+					Timestamp:       time.Now().UTC(),
+					FlowID:          v.FlowID,
+					Severity:        v.Severity,
+					Verdict:         v.Action,
+					Summary:         v.Summary,
+					Method:          env.Event.Method,
+					Path:            env.Event.Path,
+					SrcAddr:         env.Event.SrcAddr,
+					TargetAddr:      env.Event.TargetAddr,
+					UserAgent:       headerValue(env.Event.Headers, "User-Agent"),
+					Handler:         v.MatchedHandler,
+					Advisories:      v.MatchedAdvisories,
+					Recommendations: v.Recommendations,
 				})
 			}
-			// Enforce agent-recommended blocks through the pluggable enforcer.
-			if v.Action == "recommend-block" && enforcer != nil {
-				if ip := net.ParseIP(env.Event.SrcAddr); ip != nil {
-					// SrcAddr may be "ip:port"; strip the port.
-					if host, _, err := net.SplitHostPort(env.Event.SrcAddr); err == nil {
-						ip = net.ParseIP(host)
-					}
-					_ = enforcer.Block(ctx, ip, "agent-verdict")
+			// Enforce the agent's recommendation through the action registry:
+			// allowlisted, audited, TTL-bounded, and revertible.
+			if v.Action == "recommend-block" && registry != nil {
+				if _, err := registry.Execute(ctx, action.Request{
+					Action:    "block",
+					Scope:     decision.ScopeIP,
+					Target:    env.Event.SrcAddr,
+					Actor:     decision.NormalizeIP(env.Event.SrcAddr),
+					Reason:    "agent-verdict:" + v.Severity,
+					Operator:  "vigilante/agent",
+					Confirmed: true,
+					Evidence: map[string]string{
+						"flow_id":  v.FlowID,
+						"severity": v.Severity,
+						"summary":  v.Summary,
+					},
+				}); err != nil {
+					fmt.Fprintln(out, "[vigilante] action failed:", err)
 				}
 			}
 			// Feed the verdict into the dynamic threshold (auto-block after N).
@@ -418,6 +553,8 @@ func run(args []string, out io.Writer) error {
 		return runTCPProxy(ctx, out, corr, *listenAddr, *targetAddr, *queueSize, polGate, *sampleRate, *tlsCert, *tlsKey, alertStore, obsBridge, obsMetrics)
 	case "middleware":
 		return runMiddlewareMode(ctx, out, corr, *listenAddr, *targetAddr, *queueSize, *tlsCert, *tlsKey, polGate, alertStore, *sampleRate, obsBridge, obsMetrics)
+	case "sidecar":
+		return runSidecar(ctx, out, corr, polEngine, *sidecarListen, *targetAddr, *queueSize, *sampleRate)
 	case "gateway":
 		gwPosture, gwExternal := splitGatewayArg(*gatewayPosture)
 		if gwExternal != "" && *targetAddr == "" {
@@ -430,6 +567,47 @@ func run(args []string, out io.Writer) error {
 	default:
 		return fmt.Errorf("unsupported mode %q (choose demo, http, tcp, middleware, gateway, passive, or agent-worker)", *mode)
 	}
+}
+
+// runSidecar serves the ingress decision API used by proxy plugins (Traefik's
+// Yaegi middleware, nginx auth_request/mirror, or any external authz client).
+// It runs the same policy engine and mirror pipeline as the standalone gateway:
+// /v1/decide returns a JSON verdict, /v1/check returns 204/403, and
+// /v1/observe only mirrors the request for agent triage.
+func runSidecar(ctx context.Context, out io.Writer, corr *correlator.Correlator, engine *policy.Engine, listenAddr, targetAddr string, queueSize int, sampleRate float64) error {
+	queue := tap.NewMirrorQueue(queueSize)
+	queue.SetSampleRate(sampleRate)
+
+	// Label observations with the upstream host:port so the correlator can map
+	// the flow back to the process that owns it.
+	labelTarget := targetAddr
+	if u, err := url.Parse(targetAddr); err == nil && u.Host != "" {
+		labelTarget = u.Host
+	}
+
+	decider := ingress.New(ingress.Config{
+		Policy:     engine,
+		Queue:      queue,
+		ListenAddr: listenAddr,
+		TargetAddr: labelTarget,
+	})
+	queue.Drain(ctx, 2, func(ctx context.Context, ev agent.PacketEvent) {
+		_, _ = corr.ProcessPacket(ctx, ev)
+	})
+
+	srv := ingress.NewServer(decider, listenAddr)
+	go func() {
+		<-ctx.Done()
+		shutCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		_ = srv.Shutdown(shutCtx)
+	}()
+
+	fmt.Fprintf(out, "[vigilante] ingress sidecar on %s: /v1/decide (JSON), /v1/check (204/403), /v1/observe (mirror)\n", listenAddr)
+	if err := srv.ListenAndServe(); err != nil {
+		return err
+	}
+	return nil
 }
 
 // runMiddlewareMode embeds the Vigilante tap in-process behind an existing
@@ -630,6 +808,35 @@ func orDash(s string) string {
 		return "none"
 	}
 	return s
+}
+
+// splitCSV parses a comma-separated list, trimming and dropping empties.
+func splitCSV(raw string) []string {
+	var out []string
+	for _, part := range strings.Split(raw, ",") {
+		if v := strings.TrimSpace(part); v != "" {
+			out = append(out, v)
+		}
+	}
+	return out
+}
+
+// orNever renders a zero expiry as "never".
+func orNever(t time.Time) string {
+	if t.IsZero() {
+		return "never"
+	}
+	return t.Format(time.RFC3339)
+}
+
+// headerValue looks up a header case-insensitively in a mirrored header map.
+func headerValue(headers map[string]string, name string) string {
+	for k, v := range headers {
+		if strings.EqualFold(k, name) {
+			return v
+		}
+	}
+	return ""
 }
 
 func runDemo(ctx context.Context, out io.Writer, corr *correlator.Correlator, store graph.Store, supervised bool, sampleRate float64) error {

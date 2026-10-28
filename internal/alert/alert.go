@@ -53,18 +53,21 @@ func rank(s Severity) int {
 
 // Record is one persisted/delivered alert.
 type Record struct {
-	Timestamp  time.Time `json:"timestamp"`
-	FlowID     string    `json:"flow_id"`
-	Severity   Severity  `json:"severity"`
-	Action     string    `json:"action"`
-	Summary    string    `json:"summary,omitempty"`
-	Method     string    `json:"method,omitempty"`
-	Path       string    `json:"path,omitempty"`
-	SrcAddr    string    `json:"src_addr,omitempty"`
-	TargetAddr string    `json:"target_addr,omitempty"`
-	Rule       string    `json:"policy_rule,omitempty"` // policy rule that triggered, if any
-	Handler    string    `json:"matched_handler,omitempty"`
-	Advisories []string  `json:"matched_advisories,omitempty"`
+	Timestamp      time.Time `json:"timestamp"`
+	FlowID         string    `json:"flow_id"`
+	Severity       Severity  `json:"severity"`
+	Action         string    `json:"action"`
+	Summary        string    `json:"summary,omitempty"`
+	Method         string    `json:"method,omitempty"`
+	Path           string    `json:"path,omitempty"`
+	SrcAddr        string    `json:"src_addr,omitempty"`
+	TargetAddr     string    `json:"target_addr,omitempty"`
+	UserAgent      string    `json:"user_agent,omitempty"`
+	TLSFingerprint string    `json:"tls_fingerprint,omitempty"`
+	Signals        []string  `json:"signals,omitempty"`
+	Rule           string    `json:"policy_rule,omitempty"` // policy rule that triggered, if any
+	Handler        string    `json:"matched_handler,omitempty"`
+	Advisories     []string  `json:"matched_advisories,omitempty"`
 }
 
 // Reader reads persisted alerts for consumers (dashboards, APIs, exporters).

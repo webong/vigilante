@@ -40,6 +40,24 @@ block_threshold: 5         # auto-block after N qualifying verdicts (0 = off)
 block_window: 1m
 block_min_severity: high
 
+# Actions: what the host is allowed to *do* about a detection.
+# Only ids listed here may run; everything else is refused. Decisions are
+# audited and always time-bounded (they revert themselves when they expire).
+action_allow: block
+action_dry_run: false      # true = report what would happen, enforce nothing
+action_ttl: 1h             # default lifetime of an applied decision
+action_max_ttl: 24h        # ceiling on any decision's lifetime
+
+# Remote action (any HTTP API: WAF, load balancer, ticketing, on-call).
+# Add "notify" to action_allow to use it. URLs and the body are templates:
+#   {target} {scope} {action} {reason} {ttl} {ref}
+# The create response may return {"id": "..."} or {"revert_ref": "..."}; that
+# handle is passed back as {ref} when the decision expires or is reverted.
+# action_webhook: https://api.example.com/zones/ZONE/rules
+# action_webhook_body: '{"mode":"block","target":"{target}","note":"{reason}"}'
+# action_webhook_revert: https://api.example.com/zones/ZONE/rules/{ref}
+# action_webhook_token: changeme   # sent as "Authorization: Bearer <token>"
+
 # Alert persistence + delivery (webhook retries with backoff)
 # alert_file: /var/log/vigilante/alerts.jsonl
 # alert_deliver_url: https://hooks.example.com/vigilante

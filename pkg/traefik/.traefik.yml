@@ -1,0 +1,13 @@
+# Traefik plugin manifest.
+# Publish this directory as its own git repository and reference it from
+# Traefik's experimental.plugins configuration.
+displayName: Vigilante
+type: middleware
+import: github.com/webong/vigilante/pkg/traefik
+summary: >-
+  Enforces Vigilante request policy (allow/deny/block) and mirrors traffic
+  into the Vigilante agent pipeline via a sidecar.
+testData:
+  endpoint: http://127.0.0.1:9090
+  timeout: 2
+  failOpen: true

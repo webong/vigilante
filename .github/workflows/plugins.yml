@@ -1,0 +1,48 @@
+name: plugins
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "pkg/**"
+      - "go.mod"
+      - "go.sum"
+      - ".github/workflows/plugins.yml"
+  pull_request:
+    paths:
+      - "pkg/**"
+      - "go.mod"
+      - "go.sum"
+      - ".github/workflows/plugins.yml"
+
+jobs:
+  ingress:
+    name: Ingress core (pkg/ingress, pkg/traefik)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Vet
+        run: go vet ./pkg/...
+      - name: Test
+        run: go test ./pkg/...
+
+  caddy:
+    name: Caddy module (pkg/caddy)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: pkg/caddy/go.mod
+          cache: true
+          cache-dependency-path: pkg/caddy/go.sum
+      - name: Build
+        working-directory: pkg/caddy
+        run: go build ./...
+      - name: Vet
+        working-directory: pkg/caddy
+        run: go vet ./...

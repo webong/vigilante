@@ -45,6 +45,8 @@ type Options struct {
 	Runner Runner
 	// OnBlock is invoked after each successful (or logged) block.
 	OnBlock func(ip net.IP, rule string)
+	// OnUnblock is invoked after each successful (or logged) unblock.
+	OnUnblock func(ip net.IP)
 }
 
 // Runner executes a command and returns its combined output.
@@ -221,6 +223,81 @@ func (e *Enforcer) Block(ctx context.Context, ip net.IP, rule string) error {
 		e.opts.OnBlock(ip, rule)
 	}
 	return nil
+}
+
+// Unblock removes the drop rule for ip. It is idempotent: removing a rule that
+// is not present succeeds.
+func (e *Enforcer) Unblock(ctx context.Context, ip net.IP) error {
+	if ip == nil || ip.IsUnspecified() {
+		return fmt.Errorf("block: refusing to unblock unspecified address")
+	}
+	if e.opts.Mode == ModeLog {
+		if e.opts.OnUnblock != nil {
+			e.opts.OnUnblock(ip)
+		}
+		return nil
+	}
+
+	cmdCtx, cancel := context.WithTimeout(ctx, e.opts.Timeout)
+	defer cancel()
+
+	if !e.provisioned {
+		if err := e.provision(cmdCtx); err != nil {
+			return err
+		}
+		e.provisioned = true
+	}
+	if err := e.removeDrop(cmdCtx, ip); err != nil {
+		return err
+	}
+	if e.opts.OnUnblock != nil {
+		e.opts.OnUnblock(ip)
+	}
+	return nil
+}
+
+// removeDrop deletes the DROP rule for ip in the dedicated chain.
+func (e *Enforcer) removeDrop(ctx context.Context, ip net.IP) error {
+	switch e.opts.Mode {
+	case ModeIPTables:
+		for i := 0; i < 8; i++ {
+			if _, err := e.opts.Runner(ctx, "iptables", "-C", e.opts.Chain, "-s", ip.String(), "-j", "DROP"); err != nil {
+				return nil // not present
+			}
+			if out, err := e.opts.Runner(ctx, "iptables", "-D", e.opts.Chain, "-s", ip.String(), "-j", "DROP"); err != nil {
+				return fmt.Errorf("block: iptables delete %s: %w (%s)", ip, err, strings.TrimSpace(string(out)))
+			}
+		}
+	case ModeNFT:
+		out, err := e.opts.Runner(ctx, "nft", "-a", "list", "chain", "inet", e.opts.Chain, e.opts.Chain)
+		if err != nil {
+			return nil // chain/table unavailable: nothing to remove
+		}
+		for _, handle := range nftHandles(string(out), ip.String()) {
+			if _, err := e.opts.Runner(ctx, "nft", "delete", "rule", "inet", e.opts.Chain, e.opts.Chain, "handle", handle); err != nil {
+				return fmt.Errorf("block: nft delete %s handle %s: %w", ip, handle, err)
+			}
+		}
+	}
+	return nil
+}
+
+// nftHandles extracts rule handles for a given address from `nft -a list` output.
+func nftHandles(listing, ip string) []string {
+	var handles []string
+	for _, line := range strings.Split(listing, "\n") {
+		if !strings.Contains(line, ip) || !strings.Contains(line, "drop") {
+			continue
+		}
+		fields := strings.Fields(line)
+		for i := 0; i+2 < len(fields); i++ {
+			if fields[i] == "#" && strings.EqualFold(fields[i+1], "handle") {
+				handles = append(handles, fields[i+2])
+				break
+			}
+		}
+	}
+	return handles
 }
 
 // provision creates the dedicated chain/table if missing.

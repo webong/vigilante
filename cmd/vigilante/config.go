@@ -21,7 +21,7 @@ import (
 // Anything you would otherwise pass on the CLI can live here, so setup is a
 // single file instead of a long command line.
 type Config struct {
-	// Mode: demo | http | tcp | middleware | gateway | passive | agent-worker
+	// Mode: demo | http | tcp | middleware | gateway | passive | sidecar | agent-worker
 	Mode string `yaml:"mode" json:"mode"`
 	// Agent: builtin | cli:<cmd> | supervised
 	Agent string `yaml:"agent" json:"agent"`
@@ -29,7 +29,9 @@ type Config struct {
 	Gateway string `yaml:"gateway" json:"gateway"`
 
 	Listen string `yaml:"listen" json:"listen"`
-	Target string `yaml:"target" json:"target"`
+	// SidecarListen is the listen address for -mode sidecar (ingress decision API).
+	SidecarListen string `yaml:"sidecar_listen" json:"sidecar_listen"`
+	Target        string `yaml:"target" json:"target"`
 
 	Repo       string `yaml:"repo" json:"repo"`
 	RepoRef    string `yaml:"repo_ref" json:"repo_ref"`
@@ -50,6 +52,15 @@ type Config struct {
 	BlockThreshold   int           `yaml:"block_threshold" json:"block_threshold"`
 	BlockWindow      time.Duration `yaml:"block_window" json:"block_window"`
 	BlockMinSeverity string        `yaml:"block_min_severity" json:"block_min_severity"`
+
+	ActionAllow         string        `yaml:"action_allow" json:"action_allow"`
+	ActionDryRun        *bool         `yaml:"action_dry_run" json:"action_dry_run"`
+	ActionTTL           time.Duration `yaml:"action_ttl" json:"action_ttl"`
+	ActionMaxTTL        time.Duration `yaml:"action_max_ttl" json:"action_max_ttl"`
+	ActionWebhook       string        `yaml:"action_webhook" json:"action_webhook"`
+	ActionWebhookBody   string        `yaml:"action_webhook_body" json:"action_webhook_body"`
+	ActionWebhookRevert string        `yaml:"action_webhook_revert" json:"action_webhook_revert"`
+	ActionWebhookToken  string        `yaml:"action_webhook_token" json:"action_webhook_token"`
 
 	AlertFile        string `yaml:"alert_file" json:"alert_file"`
 	AlertDeliver     string `yaml:"alert_deliver_url" json:"alert_deliver_url"`
