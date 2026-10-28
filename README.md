@@ -184,20 +184,3 @@ http.ListenAndServe(":8080", tap.NewMirror(appHandler, queue, ":8080", "app:3000
 ```sh
 go test -race -v ./...
 ```
-
----
-
-## Architecture
-
-Traffic hits the tap, is mirrored non-blockingly into a queue, and enriched with live host/process/dependency/codebase state. The enriched envelope goes to an `ext.plugin/v1` agent, which returns a verdict. Plugins live in `ext/`; host wiring lives in `internal/`.
-
-| Layer | Package |
-| --- | --- |
-| Sensor tap + passive capture | `ext/tap`, `ext/redact` |
-| Agent gateway + backends | `ext/agent` |
-| OS/process/socket + network topology | `res/system` (+ `res/system/network`) |
-| Dependency graph + CVE matching | `internal/deps` |
-| Codebase/Git indexer | `internal/repo` |
-| Policy, block, alerts, status | `internal/policy`, `internal/block`, `internal/alert`, `internal/status` |
-| Dashboard plugin | `ext/obs` |
-| Graph schema | `internal/schema` + `res/system/graph` |
