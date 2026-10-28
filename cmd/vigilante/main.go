@@ -274,15 +274,21 @@ func run(args []string, out io.Writer) error {
 	var polEngine *policy.Engine
 	var enforcer *block.Enforcer
 	var threshold *block.Threshold
-	if *policyFile != "" {
+	switch {
+	case *policyFile != "":
 		engine, err := policy.Load(*policyFile)
 		if err != nil {
 			return err
 		}
 		polEngine = engine
 		fmt.Fprintf(out, "[vigilante] policy loaded from %s\n", *policyFile)
+	case cfg.PolicyEngine != nil:
+		polEngine = cfg.PolicyEngine
+		fmt.Fprintln(out, "[vigilante] policy loaded inline from config")
+	}
+	if polEngine != nil {
 		polGate = func(r *http.Request) string {
-			return string(engine.Evaluate(r).Action)
+			return string(polEngine.Evaluate(r).Action)
 		}
 	}
 	// Static policy first, then the live snapshot. The snapshot can only make

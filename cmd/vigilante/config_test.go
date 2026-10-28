@@ -1,10 +1,14 @@
 package main
 
 import (
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
+
+	"github.com/webong/vigilante/internal/policy"
 )
 
 func TestLoadConfigJSON(t *testing.T) {
@@ -158,5 +162,183 @@ func TestFullExampleConfigParses(t *testing.T) {
 	}
 	if cfg.Mode != "http" || cfg.QueueSize != 1024 || cfg.AlertMinSeverity != "high" {
 		t.Fatalf("cfg=%+v", cfg)
+	}
+	if cfg.Policy != "/etc/vigilante/policy.yaml" || cfg.PolicyEngine != nil {
+		t.Fatalf("path-based policy should stay a path: %+v", cfg)
+	}
+}
+
+func TestYAMLExampleConfigParses(t *testing.T) {
+	cfg, err := loadConfig("../../deploy/vigilante.yaml.example")
+	if err != nil {
+		t.Fatalf("yaml example: %v", err)
+	}
+	if cfg.PolicyEngine == nil {
+		t.Fatal("expected an inline policy in the YAML example")
+	}
+	if got := actionFor(t, cfg.PolicyEngine, "GET", "/admin/users"); got != policy.ActionDeny {
+		t.Errorf("example policy /admin = %q, want deny", got)
+	}
+	if got := actionFor(t, cfg.PolicyEngine, "GET", "/api/users"); got != policy.ActionAllow {
+		t.Errorf("example policy default = %q, want allow", got)
+	}
+	if cfg.ActionAllow != "block" {
+		t.Errorf("example actions.allow = %q", cfg.ActionAllow)
+	}
+	if cfg.ActionTTL != time.Hour {
+		t.Errorf("example actions.ttl = %v", cfg.ActionTTL)
+	}
+	if cfg.AlertMinSeverity != "high" || cfg.AlertKeep != 3 {
+		t.Errorf("example alerts = %q/%d", cfg.AlertMinSeverity, cfg.AlertKeep)
+	}
+}
+
+func actionFor(t *testing.T, e *policy.Engine, method, path string) policy.Action {
+	t.Helper()
+	req := httptest.NewRequest(method, path, nil)
+	req.RemoteAddr = "203.0.113.5:1234"
+	return e.Evaluate(req).Action
+}
+
+func TestInlinePolicyAndActionsAlertsYAML(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "vig.yaml")
+	data := "" +
+		"mode: http\n" +
+		"policy:\n" +
+		"  deny_cidrs:\n" +
+		"    - 192.0.2.0/24\n" +
+		"  rules:\n" +
+		"    - name: deny-admin\n" +
+		"      action: deny\n" +
+		"      paths:\n" +
+		"        - /admin/*\n" +
+		"    - name: block-git\n" +
+		"      action: block\n" +
+		"      path_prefixes:\n" +
+		"        - /.git/\n" +
+		"actions:\n" +
+		"  allow:\n" +
+		"    - block\n" +
+		"    - notify\n" +
+		"  dry_run: true\n" +
+		"  ttl: 30m\n" +
+		"  max_ttl: 2h\n" +
+		"  webhook: https://api.example.com/rules\n" +
+		"  webhook_body: '{\"target\":\"{target}\"}'\n" +
+		"alerts:\n" +
+		"  file: /var/log/vigilante/alerts.jsonl\n" +
+		"  deliver_url: https://hooks.example.com/vigilante\n" +
+		"  min_severity: high\n" +
+		"  max_bytes: 1048576\n" +
+		"  keep: 5\n"
+	if err := os.WriteFile(path, []byte(data), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg, err := loadConfig(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.PolicyEngine == nil {
+		t.Fatal("expected an inline policy engine")
+	}
+	if got := actionFor(t, cfg.PolicyEngine, "GET", "/admin/users"); got != policy.ActionDeny {
+		t.Errorf("inline policy /admin = %q, want deny", got)
+	}
+	if got := actionFor(t, cfg.PolicyEngine, "GET", "/.git/config"); got != policy.ActionBlock {
+		t.Errorf("inline policy /.git = %q, want block", got)
+	}
+	if got := actionFor(t, cfg.PolicyEngine, "GET", "/api/v1/users"); got != policy.ActionAllow {
+		t.Errorf("inline policy default = %q, want allow", got)
+	}
+
+	if cfg.ActionAllow != "block,notify" {
+		t.Errorf("action_allow = %q", cfg.ActionAllow)
+	}
+	if cfg.ActionDryRun == nil || !*cfg.ActionDryRun {
+		t.Errorf("action_dry_run = %v", cfg.ActionDryRun)
+	}
+	if cfg.ActionTTL != 30*time.Minute {
+		t.Errorf("action_ttl = %v", cfg.ActionTTL)
+	}
+	if cfg.ActionMaxTTL != 2*time.Hour {
+		t.Errorf("action_max_ttl = %v", cfg.ActionMaxTTL)
+	}
+	if cfg.ActionWebhook != "https://api.example.com/rules" {
+		t.Errorf("action_webhook = %q", cfg.ActionWebhook)
+	}
+	if cfg.ActionWebhookBody != `{"target":"{target}"}` {
+		t.Errorf("action_webhook_body = %q", cfg.ActionWebhookBody)
+	}
+
+	if cfg.AlertFile != "/var/log/vigilante/alerts.jsonl" {
+		t.Errorf("alerts.file = %q", cfg.AlertFile)
+	}
+	if cfg.AlertDeliver != "https://hooks.example.com/vigilante" {
+		t.Errorf("alerts.deliver_url = %q", cfg.AlertDeliver)
+	}
+	if cfg.AlertMinSeverity != "high" {
+		t.Errorf("alerts.min_severity = %q", cfg.AlertMinSeverity)
+	}
+	if cfg.AlertMaxBytes != 1048576 {
+		t.Errorf("alerts.max_bytes = %d", cfg.AlertMaxBytes)
+	}
+	if cfg.AlertKeep != 5 {
+		t.Errorf("alerts.keep = %d", cfg.AlertKeep)
+	}
+}
+
+func TestInlinePolicyAndActionsAlertsJSON(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "vig.json")
+	data := `{
+  "mode": "http",
+  "policy": {
+    "deny_cidrs": ["198.51.100.0/24"],
+    "rules": [
+      {"name": "deny-admin", "action": "deny", "path_prefixes": ["/admin/"]}
+    ]
+  },
+  "actions": {"allow": ["block"], "ttl": "1h", "dry_run": false},
+  "alerts": {"file": "/tmp/a.jsonl", "min_severity": "low", "keep": 2}
+}`
+	if err := os.WriteFile(path, []byte(data), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg, err := loadConfig(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.PolicyEngine == nil {
+		t.Fatal("expected an inline policy engine")
+	}
+	if got := actionFor(t, cfg.PolicyEngine, "GET", "/admin/users"); got != policy.ActionDeny {
+		t.Errorf("inline policy /admin = %q, want deny", got)
+	}
+	if got := actionFor(t, cfg.PolicyEngine, "GET", "/api/users"); got != policy.ActionAllow {
+		t.Errorf("inline policy default = %q, want allow", got)
+	}
+	if cfg.ActionAllow != "block" || cfg.ActionTTL != time.Hour {
+		t.Errorf("actions = allow %q ttl %v", cfg.ActionAllow, cfg.ActionTTL)
+	}
+	if cfg.ActionDryRun == nil || *cfg.ActionDryRun {
+		t.Errorf("action_dry_run = %v, want false", cfg.ActionDryRun)
+	}
+	if cfg.AlertFile != "/tmp/a.jsonl" || cfg.AlertMinSeverity != "low" || cfg.AlertKeep != 2 {
+		t.Errorf("alerts = %q/%q/%d", cfg.AlertFile, cfg.AlertMinSeverity, cfg.AlertKeep)
+	}
+}
+
+func TestPolicyPathYAMLStillWorks(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "vig.yaml")
+	if err := os.WriteFile(path, []byte("policy: /etc/vig/policy.yaml\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := loadConfig(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Policy != "/etc/vig/policy.yaml" || cfg.PolicyEngine != nil {
+		t.Fatalf("cfg = %+v", cfg)
 	}
 }

@@ -88,7 +88,7 @@ Triage runs behind one `ext.plugin/v1` contract (`vigilante.agent@v1`); the impl
 
 ## Configuration
 
-Every CLI flag also has a config key, so you can put setup in one file and override per-deployment with flags (flags always win). YAML (`key: value`, inline `# comments`) or JSON; unknown keys are rejected so typos surface immediately. See [`deploy/vigilante.yaml.example`](deploy/vigilante.yaml.example).
+Everything lives in **one** `vigilante.yaml` (or JSON): the proxy settings, the policy rules, the actions the host may take, and where alerts go. CLI flags override any value. Unknown keys are rejected so typos surface immediately. See [`deploy/vigilante.yaml.example`](deploy/vigilante.yaml.example).
 
 ```yaml
 # vigilante.yaml
@@ -100,13 +100,35 @@ repo: auto
 agent: builtin
 agent_timeout: 30s
 
-policy: /etc/vigilante/policy.yaml
+# Policy rules — inline (or `policy: /etc/vigilante/policy.yaml`)
+policy:
+  deny_cidrs:
+    - 192.0.2.0/24
+  rules:
+    - name: deny-admin
+      action: deny          # 403, not mirrored
+      paths:
+        - /admin/*
+    - name: block-git
+      action: block         # mirrored for triage, then 403
+      path_prefixes:
+        - /.git/
+
+# What the host is allowed to do about a detection
+actions:
+  allow:
+    - block
+  dry_run: false
+  ttl: 1h
+  max_ttl: 24h
+
+# Where alerts go
+alerts:
+  file: /var/log/vigilante/alerts.jsonl
+  min_severity: high
+  deliver_url: https://hooks.example.com/vigilante
+
 block_mode: log            # log | iptables | nft
-
-alert_file: /var/log/vigilante/alerts.jsonl
-alert_min_severity: high
-alert_deliver_url: https://hooks.example.com/vigilante
-
 queue_size: 1024
 sample_rate: 1.0
 obs: true
@@ -116,26 +138,30 @@ obs: true
 vigilante -config vigilante.yaml
 ```
 
+The legacy flat keys (`policy: <path>`, `action_allow`, `action_ttl`, `alert_file`, `alert_min_severity`, …) still work; the inline blocks are just a more readable way to set the same values.
+
 ## Policy & blocking
 
-A declarative policy file gates requests before forwarding. The first match wins; unmatched requests are allowed (deny is opt-in). Loopback and unspecified addresses are never blocked.
+Policy gates requests before forwarding. The first match wins; unmatched requests are allowed (deny is opt-in). Loopback and unspecified addresses are never blocked.
 
 ```yaml
-deny_cidrs:
-  - 192.0.2.0/24
-rules:
-  - name: block-admin
-    action: deny            # 403, not mirrored
-    paths:
-      - /admin/*
-  - name: block-git
-    action: block           # mirrored for triage, then 403 + source block
-    path_prefixes:
-      - /.git/
-  - name: allow-health
-    action: allow
-    paths:
-      - /healthz
+# Inside vigilante.yaml (inline), or in a separate file passed to -policy:
+policy:
+  deny_cidrs:
+    - 192.0.2.0/24
+  rules:
+    - name: deny-admin
+      action: deny            # 403, not mirrored
+      paths:
+        - /admin/*
+    - name: block-git
+      action: block           # mirrored for triage, then 403 + source block
+      path_prefixes:
+        - /.git/
+    - name: allow-health
+      action: allow
+      paths:
+        - /healthz
 ```
 
 Rules match on `methods`, `hosts`, `paths` (glob), `path_prefixes`, and `cidrs`. `block` verdicts are enforced via `-block-mode log` (dry-run, default), `iptables`, or `nft`. Auto-block a source after repeated bad verdicts with `-block-threshold N -block-window 1m -block-min-severity high`.

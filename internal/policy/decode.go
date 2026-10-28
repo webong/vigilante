@@ -57,6 +57,11 @@ func decodeYAMLSubset(data []byte) (Config, error) {
 		if trimmed == "" || strings.HasPrefix(trimmed, "#") {
 			continue
 		}
+		// Strip a trailing inline comment so "action: deny  # note" works.
+		trimmed = strings.TrimSpace(stripComment(trimmed))
+		if trimmed == "" {
+			continue
+		}
 		indent := len(line) - len(strings.TrimLeft(line, " "))
 
 		if indent == 0 {
@@ -182,4 +187,27 @@ func appendField(r *Rule, key, val string) error {
 		return fmt.Errorf("policy: unsupported rule key %q", key)
 	}
 	return nil
+}
+
+// stripComment removes a trailing " # ..." comment. A '#' inside quotes, or
+// with no leading whitespace (a URL fragment), is preserved.
+func stripComment(s string) string {
+	inQuote := byte(0)
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		if inQuote != 0 {
+			if c == inQuote {
+				inQuote = 0
+			}
+			continue
+		}
+		if c == '"' || c == '\'' {
+			inQuote = c
+			continue
+		}
+		if c == '#' && i > 0 && (s[i-1] == ' ' || s[i-1] == '\t') {
+			return strings.TrimRight(s[:i], " \t")
+		}
+	}
+	return s
 }

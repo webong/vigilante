@@ -32,8 +32,26 @@ repo: auto
 # planner_url: http://127.0.0.1:8081
 # planner_token: changeme
 
-# Policy enforcement
-# policy: /etc/vigilante/policy.yaml
+# Policy rules — inline in this file. Alternatively point at a separate file
+# with `policy: /etc/vigilante/policy.yaml`.
+policy:
+  deny_cidrs:
+    - 192.0.2.0/24
+  rules:
+    - name: deny-admin
+      action: deny            # 403, not mirrored
+      paths:
+        - /admin/*
+    - name: block-git
+      action: block           # mirrored for triage, then 403
+      path_prefixes:
+        - /.git/
+    - name: allow-health
+      action: allow
+      paths:
+        - /healthz
+
+# Enforcement backend for block verdicts.
 block_mode: log            # log (dry-run) | iptables | nft
 block_chain: VIGILANTE
 block_threshold: 5         # auto-block after N qualifying verdicts (0 = off)
@@ -41,22 +59,23 @@ block_window: 1m
 block_min_severity: high
 
 # Actions: what the host is allowed to *do* about a detection.
-# Only ids listed here may run; everything else is refused. Decisions are
-# audited and always time-bounded (they revert themselves when they expire).
-action_allow: block
-action_dry_run: false      # true = report what would happen, enforce nothing
-action_ttl: 1h             # default lifetime of an applied decision
-action_max_ttl: 24h        # ceiling on any decision's lifetime
-
-# Remote action (any HTTP API: WAF, load balancer, ticketing, on-call).
-# Add "notify" to action_allow to use it. URLs and the body are templates:
-#   {target} {scope} {action} {reason} {ttl} {ref}
-# The create response may return {"id": "..."} or {"revert_ref": "..."}; that
-# handle is passed back as {ref} when the decision expires or is reverted.
-# action_webhook: https://api.example.com/zones/ZONE/rules
-# action_webhook_body: '{"mode":"block","target":"{target}","note":"{reason}"}'
-# action_webhook_revert: https://api.example.com/zones/ZONE/rules/{ref}
-# action_webhook_token: changeme   # sent as "Authorization: Bearer <token>"
+# Only ids listed under `allow` may run; everything else is refused. Decisions
+# are audited and time-bounded (they revert themselves when they expire).
+actions:
+  allow:
+    - block
+  dry_run: false           # true = report what would happen, enforce nothing
+  ttl: 1h                  # default lifetime of an applied decision
+  max_ttl: 24h             # ceiling on any decision's lifetime
+  # Remote action (any HTTP API: WAF, load balancer, ticketing, on-call).
+  # Add "notify" to `allow` to use it. URLs and the body are templates over
+  #   {target} {scope} {action} {reason} {ttl} {ref}
+  # The create response may return {"id":"..."} or {"revert_ref":"..."}; that
+  # handle is passed back as {ref} when the decision expires or is reverted.
+  # webhook: https://api.example.com/zones/ZONE/rules
+  # webhook_body: '{"mode":"block","target":"{target}","note":"{reason}"}'
+  # webhook_revert: https://api.example.com/zones/ZONE/rules/{ref}
+  # webhook_token: changeme   # sent as "Authorization: Bearer <token>"
 
 # Actor aggregation (served as data at /obs/actors)
 actor_window: 24h           # sliding window over which risk is scored
@@ -64,11 +83,12 @@ actor_risk_threshold: 50    # risk at/above which an actor is "suspicious"
 actor_max: 10000            # actors retained before the least-recently-seen is evicted
 
 # Alert persistence + delivery (webhook retries with backoff)
-# alert_file: /var/log/vigilante/alerts.jsonl
-# alert_deliver_url: https://hooks.example.com/vigilante
-alert_min_severity: high
-alert_max_bytes: 10485760   # rotate after 10 MiB
-alert_keep: 3
+alerts:
+  # file: /var/log/vigilante/alerts.jsonl
+  # deliver_url: https://hooks.example.com/vigilante
+  min_severity: high
+  max_bytes: 10485760   # rotate after 10 MiB
+  keep: 3
 
 # Metrics / graph / sampling
 queue_size: 1024
