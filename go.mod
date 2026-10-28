@@ -7,7 +7,7 @@ require (
 	github.com/webong/ext/res/system v0.2.0
 )
 
-require golang.org/x/sys v0.29.0 // indirect
+require golang.org/x/sys v0.29.0
 
 replace (
 	github.com/webong/ext/pkg/ext-go/engine => ../ext/pkg/ext-go/engine

@@ -160,11 +160,13 @@ traffic you don't control the ingress for.
 |----|---------|-------------|
 | **Linux** | `AF_PACKET` raw socket + BPF port filter | `root` / `CAP_NET_RAW` |
 | **macOS** | system `tcpdump` (no cgo) parsing line output | `sudo` (BPF capture) |
-| **Windows** | npcap driver (not yet wired — clear error) | npcap + SDK (future) |
+| **Windows** | npcap `Packet.dll` (pure-Go `syscall`, no cgo) | npcap installed + run as Admin |
 
-All three compile; Linux and macOS are functional (macOS smoke-tested — capture
-needs `sudo`). The packet decode path (`DecodeFrame`) is shared and unit-tested
-on every platform.
+All three compile and vet clean. Linux and macOS are functional (macOS
+smoke-tested — capture needs `sudo`); the Windows backend loads npcap's
+`Packet.dll` at runtime and reports a clear error if npcap isn't installed.
+The packet decode path (`DecodeFrame`) is shared and unit-tested on every
+platform.
 
 ### 8. Embed the Tap In-Process (middleware mode)
 `-mode middleware` wraps the mirror tap around an existing handler seam — use it
