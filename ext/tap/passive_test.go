@@ -1,5 +1,3 @@
-//go:build linux
-
 package tap
 
 import (
@@ -30,9 +28,8 @@ func buildIPv4TCPFrame(srcIP, dstIP net.IP, sport, dport uint16, payload []byte)
 }
 
 func TestDecodeIPv4TCP(t *testing.T) {
-	s := &PassiveSensor{opts: PassiveOptions{SnapLen: 1514}}
 	frame := buildIPv4TCPFrame(net.ParseIP("10.0.0.1"), net.ParseIP("10.0.0.2"), 5555, 8080, []byte("GET /admin"))
-	ev, ok := s.decode(frame)
+	ev, ok := DecodeFrame(frame, 1514)
 	if !ok {
 		t.Fatal("decode failed")
 	}
@@ -48,26 +45,23 @@ func TestDecodeIPv4TCP(t *testing.T) {
 }
 
 func TestDecodeRejectsNonIPv4(t *testing.T) {
-	s := &PassiveSensor{opts: PassiveOptions{SnapLen: 1514}}
 	frame := make([]byte, 40)
 	binary.BigEndian.PutUint16(frame[12:14], 0x86DD) // IPv6
-	if _, ok := s.decode(frame); ok {
+	if _, ok := DecodeFrame(frame, 1514); ok {
 		t.Fatal("non-IPv4 should be rejected")
 	}
 }
 
 func TestDecodeRejectsTruncated(t *testing.T) {
-	s := &PassiveSensor{opts: PassiveOptions{SnapLen: 1514}}
-	if _, ok := s.decode([]byte{1, 2, 3}); ok {
+	if _, ok := DecodeFrame([]byte{1, 2, 3}, 1514); ok {
 		t.Fatal("truncated frame should be rejected")
 	}
 }
 
 func TestDecodeRedactsPayload(t *testing.T) {
-	s := &PassiveSensor{opts: PassiveOptions{SnapLen: 1514}}
 	frame := buildIPv4TCPFrame(net.ParseIP("10.0.0.1"), net.ParseIP("10.0.0.2"), 1, 2,
 		[]byte(`token=sk-abcdefghijklmnop`))
-	ev, ok := s.decode(frame)
+	ev, ok := DecodeFrame(frame, 1514)
 	if !ok {
 		t.Fatal("decode failed")
 	}

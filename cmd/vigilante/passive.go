@@ -1,5 +1,3 @@
-//go:build linux
-
 package main
 
 import (
@@ -22,7 +20,8 @@ import (
 // agent pipeline. Requires root/CAP_NET_RAW. Status/obs are served on a sidecar.
 func runPassiveMode(ctx context.Context, out io.Writer, corr *correlator.Correlator, iface, portsCSV string, queueSize int, sampleRate float64, alertStore *alert.Store, obsB *obs.Bridge, obsM func(http.ResponseWriter)) error {
 	if iface == "" {
-		return fmt.Errorf("-mode passive requires -passive-iface (e.g. eth0)")
+		// Linux requires an explicit interface; macOS defaults to "any".
+		iface = "any"
 	}
 	var ports []int
 	for _, p := range strings.Split(portsCSV, ",") {

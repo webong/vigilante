@@ -154,6 +154,18 @@ Linux-only (`AF_PACKET`). It never forwards or modifies packets; status/obs are
 served on a loopback sidecar. This is the posture for observing production
 traffic you don't control the ingress for.
 
+**Cross-platform capture backends** (shared decode, per-OS capture):
+
+| OS | Backend | Requirement |
+|----|---------|-------------|
+| **Linux** | `AF_PACKET` raw socket + BPF port filter | `root` / `CAP_NET_RAW` |
+| **macOS** | system `tcpdump` (no cgo) parsing line output | `sudo` (BPF capture) |
+| **Windows** | npcap driver (not yet wired — clear error) | npcap + SDK (future) |
+
+All three compile; Linux and macOS are functional (macOS smoke-tested — capture
+needs `sudo`). The packet decode path (`DecodeFrame`) is shared and unit-tested
+on every platform.
+
 ### 8. Embed the Tap In-Process (middleware mode)
 `-mode middleware` wraps the mirror tap around an existing handler seam — use it
 when Vigilante runs inside the same process as the application:
