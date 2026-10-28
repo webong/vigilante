@@ -76,7 +76,7 @@ func TestBuildPromptContainsContext(t *testing.T) {
 			t.Errorf("prompt missing %q", want)
 		}
 	}
-	if !strings.Contains(p, "severity") || !strings.Contains(p, "recommend-block") {
+	if !strings.Contains(p, "severity") || !strings.Contains(p, "findings") || !strings.Contains(p, "does not prove exposure") {
 		t.Error("prompt must state the output contract")
 	}
 }
@@ -97,6 +97,16 @@ func TestCLIHandlerSuccess(t *testing.T) {
 	}
 	if v.FlowID != "f1" {
 		t.Fatalf("FlowID not defaulted: %q", v.FlowID)
+	}
+}
+
+func TestCLIHandlerMayCompleteWithoutVerdict(t *testing.T) {
+	h := NewCLIHandler(CLIOptions{Command: "fake", Run: func(context.Context, string, ...string) ([]byte, error) {
+		return nil, nil
+	}})
+	v, err := h(context.Background(), sampleEnv())
+	if err != nil || v.Severity != "" || v.Action != "" || v.Summary != "" {
+		t.Fatalf("expected delivery acknowledgement, got %+v, %v", v, err)
 	}
 }
 

@@ -1,6 +1,6 @@
 # Vigilante
 
-Vigilante watches your service's network traffic and flags suspicious activity — path traversal, SQL injection, secret leaks — with full context about what's running, what's listening, and which dependencies are vulnerable.
+Vigilante watches your service's network traffic and flags suspicious activity with context about what's running, what's listening, and which dependencies are installed. An agent can investigate advisories and decide what the evidence supports.
 
 Run it three ways:
 
@@ -34,7 +34,7 @@ Point clients at `:8080`; Vigilante forwards to your app on `:3000` while analyz
 sudo go run ./cmd/vigilante -mode passive -passive-iface eth0 -repo auto
 ```
 
-Linux (`AF_PACKET`), macOS (system `tcpdump`), and Windows (npcap `Packet.dll`) are supported.
+Linux (`AF_PACKET`), macOS (system `tcpdump`), and Windows (npcap `Packet.dll`) are supported. The shared raw-frame decoder (Linux/Windows) handles IPv4, IPv6, and up to two VLAN tags. It joins consecutive TCP payloads into a bounded rolling preview; gaps and fragments are skipped rather than presented as a complete stream. The macOS `tcpdump` text backend provides packet addresses but no payload preview. Passive capture cannot decrypt TLS traffic.
 
 ## Modes
 
@@ -75,16 +75,38 @@ Triage runs behind one `ext.plugin/v1` contract (`vigilante.agent@v1`); the impl
 
 | Backend | What it is |
 | --- | --- |
-| `builtin` (default) | In-process rule/analysis engine. |
-| `cli:<cmd>` | Shell out to an external LLM/agent binary — envelope on stdin, JSON verdict on stdout, falls back to builtin on failure. |
-| `supervised` | Out-of-process agent via `ext/res/system/supervisor` + jsonline IPC. |
+| `builtin` (default) | Small in-process detector for obvious request indicators. It does not research advisories or infer vulnerable-code reachability. |
+| `cli:<cmd>` | Run a local agent executable: enriched envelope JSON on stdin. It may return verdict JSON or complete without output. Falls back to builtin on failure. |
+| `remote:<https-url>` | POST a host-collected evidence envelope to a local service or cloud agent. A verdict response is optional. |
+| `supervised` | Out-of-process built-in worker via `ext/res/system/supervisor` + jsonline IPC; the plugin contract also supports custom guests. |
 
 ```sh
 -agent builtin
--agent cli:claude
 -agent cli:/usr/local/bin/my-triage-agent
+-agent remote:https://agent.example.com/v1/triage
 -agent supervised
 ```
+
+For a remote agent, set `VIGILANTE_AGENT_TOKEN` to send a bearer token. The endpoint must use HTTPS (loopback HTTP is allowed for a local agent service). Vigilante sends one `EnrichedEnvelope` JSON object with the redacted event, host and process inventory, network topology, dependency inventory, matched route and up to three redacted source excerpts, and host-collected OSV advisory candidates. The agent can return HTTP `202`/`204`, an empty `200`, or a JSON acknowledgement if it handles storage and delivery itself. It may instead return a `Verdict` JSON object with `severity`, `action`, and `summary`; optional `findings` carry claims and evidence. The returned `flow_id`, if present, must match the request. An acknowledgement creates no local verdict or action.
+
+```text
+POST /v1/triage  <EnrichedEnvelope JSON>
+202 Accepted     # agent queues work and uses its own configured storage/delivery
+```
+
+```json
+{"flow_id":"...","severity":"high","action":"alert","summary":"...","findings":[]}
+```
+
+The JSON response is optional. A local `cli:<cmd>` agent can likewise exit with no stdout after accepting the envelope.
+
+The host checks exact dependency versions with OSV once per process (cached for 15 minutes), before sending the first remote envelope. Research is capped at 256 supported dependencies and five seconds. Matching advisories include full details when the follow-up lookup completes; each candidate reports `details_complete`. The envelope reports `advisory_research.status`, `checked_count`, and `skipped_count`; `error` and `pending` do not mean clean. Advisory candidates establish package matches only. The mirrored triage worker may wait for that first lookup, while primary traffic continues through its own path. HTTP delivery failures are reported as errors and are not silently turned into findings.
+
+Vigilante does not select or lock a model or agent runtime. A local or cloud agent may use its own tools and skills, store findings, or deliver them to destinations configured in that agent. Vigilante only requires a verdict when the agent wants Vigilante to record findings or consider a host action. The host enforces actions through its separate allowlist; a model's recommendation alone does not grant authority.
+
+An `ext.plugin/v1` guest can call `vigilante.host@v1/lookup-advisories` with `{ "ecosystem": "npm", "name": "express", "version": "4.18.2" }`. The host queries OSV on demand and caches successful results for 15 minutes. `query-graph` and `read-source` remain available for further investigation. CLI agents can perform their own research using their own tools. Advisory lookup errors do not turn into vulnerability claims. See the [OSV API](https://google.github.io/osv.dev/post-v1-query/) for the source contract.
+
+Installed package, network exposure, and vulnerable-code reachability are distinct findings. The built-in detector reports request indicators only. Agents should cite evidence before claiming exposure or reachability.
 
 ## Configuration
 

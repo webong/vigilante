@@ -75,10 +75,11 @@ func handleDownload(w http.ResponseWriter, r *http.Request) {
 	var capturedVerdicts []agent.Verdict
 
 	corr, err := correlator.New(correlator.Options{
-		SystemGraph: sysGraph,
-		Gateway:     gw,
-		Repo:        repoIdx,
-		FallbackPID: os.Getpid(),
+		SystemGraph:  sysGraph,
+		Gateway:      gw,
+		Repo:         repoIdx,
+		RemoteBundle: true,
+		FallbackPID:  os.Getpid(),
 		OnVerdict: func(env agent.EnrichedEnvelope, v agent.Verdict) {
 			capturedEnvelopes = append(capturedEnvelopes, env)
 			capturedVerdicts = append(capturedVerdicts, v)
@@ -160,6 +161,9 @@ func handleDownload(w http.ResponseWriter, r *http.Request) {
 	}
 	if capturedVerdicts[1].MatchedHandler != "server.go:10" {
 		t.Errorf("expected MatchedHandler server.go:10, got %q", capturedVerdicts[1].MatchedHandler)
+	}
+	if len(capturedEnvelopes[1].Codebase.SourceExcerpts) == 0 || !strings.Contains(capturedEnvelopes[1].Codebase.SourceExcerpts[0].Text, `http.HandleFunc("/download", handleDownload)`) {
+		t.Errorf("remote bundle missing matched source excerpt: %+v", capturedEnvelopes[1].Codebase)
 	}
 	if !strings.Contains(capturedVerdicts[1].InspectedSource, `http.HandleFunc("/download", handleDownload)`) {
 		t.Errorf("expected agent to read source snippet via reverse call, got %q", capturedVerdicts[1].InspectedSource)
@@ -278,7 +282,7 @@ func TestSupervisedOutOfProcessAgentAndReverseQuery(t *testing.T) {
 func TestMultiEcosystemLockfilesAndAdvisoryMatching(t *testing.T) {
 	tmp := t.TempDir()
 
-	// Write sample package-lock.json with vulnerable express 4.18.2 and lodash 4.17.20
+	// Write sample package-lock.json with express and lodash dependencies.
 	pkgLock := `{
   "name": "payments-service",
   "packages": {
@@ -311,7 +315,7 @@ version = "1.38.0"
 	if len(g.Dependencies) < 5 {
 		t.Fatalf("expected at least 5 dependencies across npm/cargo/pypi/shared-lib, got %d", len(g.Dependencies))
 	}
-	if len(g.Vulnerabilities) != 3 {
-		t.Fatalf("expected 3 matched CVE advisories (express, lodash, urllib3), got %d: %+v", len(g.Vulnerabilities), g.Vulnerabilities)
+	if len(g.Vulnerabilities) != 0 {
+		t.Fatalf("inventory must not infer vulnerability findings, got %+v", g.Vulnerabilities)
 	}
 }

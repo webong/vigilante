@@ -16,8 +16,8 @@ import (
 // etc.) and parses a Verdict from its stdout.
 //
 // The external command receives the full EnrichedEnvelope as JSON on stdin and
-// must print a JSON Verdict (a bare object, or one embedded in a larger
-// response). Reverse host capabilities (read-source, query-graph) are performed
+// may print a JSON Verdict (a bare object, or one embedded in a larger
+// response), or exit successfully without output. Reverse host capabilities (read-source, query-graph) are performed
 // by the command itself using its environment; the triage contract still
 // executes behind the same ext.plugin/v1 session as any other agent.
 type CLIOptions struct {
@@ -30,7 +30,7 @@ type CLIOptions struct {
 	// Timeout bounds one triage invocation (default 30s).
 	Timeout time.Duration
 	// Run, when non-nil, replaces command execution (tests). Its combined
-	// output is parsed as the Verdict.
+	// output is parsed as the Verdict when present.
 	Run Runner
 	// OnError, when set, is invoked with the underlying command error.
 	OnError func(error)
@@ -75,6 +75,9 @@ func cliTriage(ctx context.Context, opts CLIOptions, env EnrichedEnvelope) (Verd
 	}
 	if err != nil {
 		return Verdict{}, fmt.Errorf("cli agent: %s: %w", opts.Command, err)
+	}
+	if len(bytes.TrimSpace(out)) == 0 {
+		return Verdict{}, nil
 	}
 
 	verdict, perr := ParseVerdictOutput(out)
@@ -185,16 +188,18 @@ func extractVerdict(s string) (Verdict, bool) {
 func BuildPrompt(env EnrichedEnvelope) string {
 	var b strings.Builder
 	b.WriteString("You are a security triage agent for a live network gateway.\n")
-	b.WriteString("Analyze the ENRICHED_ENVELOPE JSON provided on stdin and respond with ONLY a JSON object:\n")
+	b.WriteString("Analyze the ENRICHED_ENVELOPE JSON provided on stdin. If Vigilante should handle your verdict, respond with ONLY a JSON object:\n")
 	b.WriteString("{\"flow_id\":\"...\",\"severity\":\"info|low|medium|high|critical\",\n")
-	b.WriteString("\"action\":\"observe|alert|flag-cve-reachability|recommend-block\",\"summary\":\"...\",\n")
-	b.WriteString("\"recommendations\":[\"...\"]}\n\n")
+	b.WriteString("\"action\":\"your recommended action\",\"summary\":\"...\",\n")
+	b.WriteString("\"findings\":[{\"subject\":\"...\",\"claim\":\"...\",\"evidence\":[\"...\"],\"sources\":[\"...\"],\"confidence\":\"...\"}],\"recommendations\":[\"...\"]}\n")
+	b.WriteString("Investigate independently. An installed dependency does not prove exposure or reachability. State uncertainty and cite evidence for vulnerability claims.\n\n")
+	b.WriteString("If your agent stores or delivers its own result, it may exit successfully without output.\n\n")
 	fmt.Fprintf(&b, "Event: %s %s from %s -> %s\n", env.Event.Method, env.Event.Path, env.Event.SrcAddr, env.Event.DstAddr)
 	fmt.Fprintf(&b, "Trigger: %s\n", env.TriggerReason)
 	fmt.Fprintf(&b, "Process: %s (PID %d, %s)\n", env.ServerProcess.Name, env.ServerProcess.PID, env.ServerProcess.Executable)
 	fmt.Fprintf(&b, "OS: %s/%s host=%s\n", env.OS.OS, env.OS.Arch, env.OS.Hostname)
-	fmt.Fprintf(&b, "Dependencies: %d modules, %d advisories\n",
-		len(env.DependencyGraph.Dependencies), len(env.DependencyGraph.Vulnerabilities))
+	fmt.Fprintf(&b, "Dependencies: %d inventoried modules (advisory status not pre-judged)\n",
+		len(env.DependencyGraph.Dependencies))
 	if env.Codebase != nil {
 		fmt.Fprintf(&b, "Codebase: %s (commit %s, %d files)\n", env.Codebase.Source, env.Codebase.Commit, env.Codebase.FileCount)
 		if env.Codebase.MatchedRoute != nil {

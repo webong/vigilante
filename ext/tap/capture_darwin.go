@@ -28,7 +28,7 @@ type darwinCapture struct {
 }
 
 // Matches e.g. "IP 10.0.0.1.5555 > 10.0.0.2.8080: Flags [S], ...".
-var tcpdumpLineRe = regexp.MustCompile(`\bIP\s+([0-9a-fA-F:.]+)\.(\d+)\s+>\s+([0-9a-fA-F:.]+)\.(\d+):`)
+var tcpdumpLineRe = regexp.MustCompile(`\bIP6?\s+([0-9a-fA-F:.]+)\.(\d+)\s+>\s+([0-9a-fA-F:.]+)\.(\d+):`)
 
 func newPassiveCapture(opts PassiveOptions) (passiveCapture, error) {
 	iface := opts.Iface

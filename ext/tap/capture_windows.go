@@ -15,7 +15,7 @@ import (
 
 // windowsCapture uses npcap's Packet.dll (the standard Windows packet driver,
 // from https://npcap.com) loaded via pure-Go syscall — no cgo. It opens an
-// adapter, applies an optional port filter, and reads raw frames with
+// adapter and reads raw frames with
 // PacketReceivePacket, feeding the shared DecodeFrame path.
 //
 // Requires the npcap driver + Packet.dll installed (npcap.com), and the process
@@ -25,7 +25,6 @@ var (
 	procOpenAdapter     = packetDLL.NewProc("PacketOpenAdapter")
 	procCloseAdapter    = packetDLL.NewProc("PacketCloseAdapter")
 	procSetSnapLen      = packetDLL.NewProc("PacketSetHwSnapLen")
-	procSetBpf          = packetDLL.NewProc("PacketSetBpf")
 	procReceivePacket   = packetDLL.NewProc("PacketReceivePacket")
 	procGetAdapterNames = packetDLL.NewProc("PacketGetAdapterNames")
 )
@@ -38,20 +37,6 @@ type packetHeader struct {
 	Snaplen      uint32
 	// Followed by a data buffer in the npcap API; we use PacketReceivePacket
 	// with an overlapped buffer allocated after the header.
-}
-
-// bpfProgram mirrors the classic-BPF program passed to PacketSetBpf
-// (the same bytecode our Linux backend builds).
-type bpfProgram struct {
-	Len    uint16
-	Filter *bpfInsn
-}
-
-type bpfInsn struct {
-	Code uint16
-	Jt   uint8
-	Jf   uint8
-	K    uint32
 }
 
 type windowsCapture struct {
@@ -86,14 +71,6 @@ func newPassiveCapture(opts PassiveOptions) (passiveCapture, error) {
 	c := &windowsCapture{adapter: adapter, snapLen: opts.SnapLen, buf: make([]byte, 65536)}
 	if opts.SnapLen > 0 {
 		procSetSnapLen.Call(adapter, uintptr(uint32(opts.SnapLen)))
-	}
-	if len(opts.Ports) > 0 {
-		prog, err := buildWindowsBPF(opts.Ports)
-		if err != nil {
-			procCloseAdapter.Call(adapter)
-			return nil, err
-		}
-		procSetBpf.Call(adapter, uintptr(unsafe.Pointer(prog)))
 	}
 	return c, nil
 }
@@ -153,48 +130,6 @@ func (c *windowsCapture) Close() error {
 		c.closed = true
 	}
 	return nil
-}
-
-// buildWindowsBPF builds the same classic-BPF bytecode as the Linux backend
-// (port filter) for npcap's PacketSetBpf.
-func buildWindowsBPF(ports []int) (*bpfProgram, error) {
-	const (
-		ldhAbs = 0x28
-		ldbAbs = 0x30
-		jeqK   = 0x15
-		retK   = 0x06
-	)
-	var f []bpfInsn
-	f = append(f, bpfInsn{Code: ldhAbs, K: 12})
-	f = append(f, bpfInsn{Code: jeqK, K: 0x0800, Jt: 0, Jf: 1})
-	f = append(f, bpfInsn{Code: ldbAbs, K: 23})
-	f = append(f, bpfInsn{Code: jeqK, K: 6, Jt: 1, Jf: 0})
-	f = append(f, bpfInsn{Code: jeqK, K: 17, Jt: 0, Jf: 1})
-	f = append(f, bpfInsn{Code: ldhAbs, K: 34})
-	srcJEQ := len(f)
-	for range ports {
-		f = append(f, bpfInsn{})
-	}
-	f = append(f, bpfInsn{Code: ldhAbs, K: 36})
-	dstJEQ := len(f)
-	for range ports {
-		f = append(f, bpfInsn{})
-	}
-	rejectIdx := len(f)
-	f = append(f, bpfInsn{Code: retK, K: 0})
-	acceptIdx := len(f)
-	f = append(f, bpfInsn{Code: retK, K: 0xFFFFFFFF})
-	for i := range ports {
-		jt := uint8(acceptIdx - (srcJEQ + i) - 1)
-		f[srcJEQ+i] = bpfInsn{Code: jeqK, K: uint32(ports[i]), Jt: jt}
-	}
-	for i := range ports {
-		jt := uint8(acceptIdx - (dstJEQ + i) - 1)
-		f[dstJEQ+i] = bpfInsn{Code: jeqK, K: uint32(ports[i]), Jt: jt}
-	}
-	f[1].Jf = uint8(rejectIdx - 2)
-	f[4].Jf = uint8(rejectIdx - 4)
-	return &bpfProgram{Len: uint16(len(f)), Filter: &f[0]}, nil
 }
 
 // firstAdapterName returns the first adapter name reported by npcap.

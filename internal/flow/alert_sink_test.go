@@ -30,6 +30,7 @@ func TestAlertSinkMapsEveryField(t *testing.T) {
 		Signals:        []string{"accepts_markdown"},
 		Handler:        "cmd/server/main.go:42",
 		Advisories:     []string{"CVE-2024-0001"},
+		Findings:       []alert.Finding{{Subject: "example@1.0.0", Claim: "advisory present", Sources: []string{"https://osv.dev/vulnerability/TEST-1"}}},
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -46,6 +47,9 @@ func TestAlertSinkMapsEveryField(t *testing.T) {
 	}
 	if !got.Timestamp.Equal(ts) {
 		t.Fatalf("timestamp = %s, want %s", got.Timestamp, ts)
+	}
+	if len(got.Findings) != 1 || got.Findings[0].Claim != "advisory present" {
+		t.Fatalf("findings dropped: %+v", got.Findings)
 	}
 }
 

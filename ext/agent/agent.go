@@ -16,6 +16,7 @@ import (
 	"context"
 	"encoding/json"
 	"io"
+	"net/url"
 	"strings"
 	"time"
 
@@ -36,27 +37,30 @@ const (
 	ContractVersion = "v1"
 	OperationTriage = "triage-flow"
 
-	ReverseContractName    = "vigilante.host"
-	ReverseContractVersion = "v1"
-	ReverseOpQueryGraph    = "query-graph"
-	ReverseOpReadSource    = "read-source"
+	ReverseContractName       = "vigilante.host"
+	ReverseContractVersion    = "v1"
+	ReverseOpQueryGraph       = "query-graph"
+	ReverseOpReadSource       = "read-source"
+	ReverseOpLookupAdvisories = "lookup-advisories"
 )
 
 // PacketEvent represents a non-blocking mirrored packet or L7 request sample
 // cloned off the primary network stack.
 type PacketEvent struct {
-	FlowID         string            `json:"flow_id"`
-	Timestamp      time.Time         `json:"timestamp"`
-	Protocol       string            `json:"protocol"` // "tcp", "udp", "http"
-	SrcAddr        string            `json:"src_addr"`
-	DstAddr        string            `json:"dst_addr"`
-	TargetAddr     string            `json:"target_addr"` // Upstream backend address
-	Method         string            `json:"method,omitempty"`
-	Path           string            `json:"path,omitempty"`
-	Headers        map[string]string `json:"headers,omitempty"`
-	TLSFingerprint string            `json:"tls_fingerprint,omitempty"`
-	PayloadPreview string            `json:"payload_preview,omitempty"`
-	PayloadBytes   int               `json:"payload_bytes"`
+	FlowID          string            `json:"flow_id"`
+	Timestamp       time.Time         `json:"timestamp"`
+	Protocol        string            `json:"protocol"` // "tcp", "udp", "http"
+	SrcAddr         string            `json:"src_addr"`
+	DstAddr         string            `json:"dst_addr"`
+	TargetAddr      string            `json:"target_addr"` // Upstream backend address
+	Method          string            `json:"method,omitempty"`
+	Path            string            `json:"path,omitempty"`
+	Headers         map[string]string `json:"headers,omitempty"`
+	TLSFingerprint  string            `json:"tls_fingerprint,omitempty"`
+	PayloadPreview  string            `json:"payload_preview,omitempty"`
+	PayloadBytes    int               `json:"payload_bytes"`
+	TCPSequence     uint32            `json:"-"` // passive sensor stream preview only
+	PreviewComplete bool              `json:"-"`
 }
 
 // Redact scrubs secrets (JWTs, API keys, bearer/basic auth, secret key-values,
@@ -108,41 +112,81 @@ type ServerProcessContext struct {
 // CodebaseContext summarizes the target repository or codebase pointed to by
 // vigilante (-repo), including the matched route handler and relevant code sinks.
 type CodebaseContext struct {
-	Source        string             `json:"source"`
-	Commit        string             `json:"commit,omitempty"`
-	TreeDigest    string             `json:"tree_digest"`
-	FileCount     int                `json:"file_count"`
-	Languages     []string           `json:"languages,omitempty"`
-	MatchedRoute  *repo.RouteHandler `json:"matched_route,omitempty"`
-	RelevantSinks []repo.CodeSink    `json:"relevant_sinks,omitempty"`
+	Source         string             `json:"source"`
+	Commit         string             `json:"commit,omitempty"`
+	TreeDigest     string             `json:"tree_digest"`
+	FileCount      int                `json:"file_count"`
+	Languages      []string           `json:"languages,omitempty"`
+	MatchedRoute   *repo.RouteHandler `json:"matched_route,omitempty"`
+	RelevantSinks  []repo.CodeSink    `json:"relevant_sinks,omitempty"`
+	SourceExcerpts []SourceExcerpt    `json:"source_excerpts,omitempty"`
+}
+
+// SourceExcerpt is bounded source context collected on the host so a remote
+// agent need not access the service's filesystem.
+type SourceExcerpt struct {
+	File      string `json:"file"`
+	StartLine int    `json:"start_line"`
+	Text      string `json:"text"`
 }
 
 // EnrichedEnvelope bundles the mirrored packet with the live OS, Server,
 // Network Topology, Application Dependency Graph, and Codebase/Repository Context.
 type EnrichedEnvelope struct {
-	Event           PacketEvent          `json:"event"`
-	TriggerReason   string               `json:"trigger_reason"`
-	OS              OSContext            `json:"os"`
-	ServerProcess   ServerProcessContext `json:"server_process"`
-	NetworkTopology network.Snapshot     `json:"network_topology"`
-	DependencyGraph deps.Graph           `json:"dependency_graph"`
-	Codebase        *CodebaseContext     `json:"codebase,omitempty"`
-	GraphRevision   uint64               `json:"graph_revision"`
+	Event            PacketEvent          `json:"event"`
+	TriggerReason    string               `json:"trigger_reason"`
+	OS               OSContext            `json:"os"`
+	ServerProcess    ServerProcessContext `json:"server_process"`
+	NetworkTopology  network.Snapshot     `json:"network_topology"`
+	DependencyGraph  deps.Graph           `json:"dependency_graph"`
+	Codebase         *CodebaseContext     `json:"codebase,omitempty"`
+	GraphRevision    uint64               `json:"graph_revision"`
+	AdvisoryResearch *AdvisoryResearch    `json:"advisory_research,omitempty"`
+}
+
+// AdvisoryResearch is an inventory lookup result, not a reachability claim.
+// Pending and error states are explicit so missing data is not read as clean.
+type AdvisoryResearch struct {
+	Status       string              `json:"status"` // pending, ready, error
+	CheckedAt    time.Time           `json:"checked_at,omitempty"`
+	CheckedCount int                 `json:"checked_count"`
+	SkippedCount int                 `json:"skipped_count"`
+	Error        string              `json:"error,omitempty"`
+	Candidates   []AdvisoryCandidate `json:"candidates,omitempty"`
+}
+
+type AdvisoryCandidate struct {
+	Ecosystem       string             `json:"ecosystem"`
+	Package         string             `json:"package"`
+	Version         string             `json:"version"`
+	Advisories      []deps.OSVAdvisory `json:"advisories"`
+	DetailsComplete bool               `json:"details_complete"`
 }
 
 // Verdict is returned by the agent after analyzing the EnrichedEnvelope.
 type Verdict struct {
-	FlowID               string   `json:"flow_id"`
-	Severity             string   `json:"severity"` // "info", "low", "medium", "high", "critical"
-	Action               string   `json:"action"`   // "observe", "alert", "flag-cve-reachability", "recommend-block"
-	Summary              string   `json:"summary"`
-	ReachableDeps        []string `json:"reachable_deps,omitempty"`
-	MatchedAdvisories    []string `json:"matched_advisories,omitempty"`
-	MatchedHandler       string   `json:"matched_handler,omitempty"` // e.g. "cmd/server/main.go:42"
-	InspectedSource      string   `json:"inspected_source,omitempty"`
-	ReverseGraphQueried  bool     `json:"reverse_graph_queried,omitempty"`
-	ReverseObservedNodes int      `json:"reverse_observed_nodes,omitempty"`
-	Recommendations      []string `json:"recommendations,omitempty"`
+	FlowID               string    `json:"flow_id"`
+	Severity             string    `json:"severity"` // "info", "low", "medium", "high", "critical"
+	Action               string    `json:"action"`   // agent recommendation; host policy decides what may run
+	Summary              string    `json:"summary"`
+	ReachableDeps        []string  `json:"reachable_deps,omitempty"`     // legacy agent-supplied claim
+	MatchedAdvisories    []string  `json:"matched_advisories,omitempty"` // legacy agent-supplied claim
+	MatchedHandler       string    `json:"matched_handler,omitempty"`    // e.g. "cmd/server/main.go:42"
+	InspectedSource      string    `json:"inspected_source,omitempty"`
+	ReverseGraphQueried  bool      `json:"reverse_graph_queried,omitempty"`
+	ReverseObservedNodes int       `json:"reverse_observed_nodes,omitempty"`
+	Recommendations      []string  `json:"recommendations,omitempty"`
+	Findings             []Finding `json:"findings,omitempty"`
+}
+
+// Finding records an agent's claim and the evidence supporting it. The host
+// does not infer reachability merely from an installed dependency.
+type Finding struct {
+	Subject    string   `json:"subject"`
+	Claim      string   `json:"claim"`
+	Evidence   []string `json:"evidence,omitempty"`
+	Sources    []string `json:"sources,omitempty"`
+	Confidence string   `json:"confidence,omitempty"`
 }
 
 // GraphQueryInput is sent by the agent over a reverse call to inspect the host's
@@ -172,6 +216,16 @@ type SourceReadInput struct {
 type SourceReadOutput struct {
 	File    string `json:"file"`
 	Snippet string `json:"snippet"`
+}
+
+type AdvisoryLookupInput struct {
+	Ecosystem string `json:"ecosystem"`
+	Name      string `json:"name"`
+	Version   string `json:"version"`
+}
+
+type AdvisoryLookupOutput struct {
+	Advisories []deps.OSVAdvisory `json:"advisories"`
 }
 
 // TriageMethod returns the typed ext.plugin/v1 method definition for flow triage.
@@ -218,12 +272,21 @@ func ReverseReadSourceMethod() author.Method[SourceReadInput, SourceReadOutput] 
 	}
 }
 
+// ReverseLookupAdvisoriesMethod lets an agent investigate a dependency version
+// against OSV while retaining control over which packages warrant research.
+func ReverseLookupAdvisoriesMethod() author.Method[AdvisoryLookupInput, AdvisoryLookupOutput] {
+	return author.Method[AdvisoryLookupInput, AdvisoryLookupOutput]{
+		Contract:  engine.ContractRef{Name: ReverseContractName, Version: ReverseContractVersion},
+		Operation: engine.Operation{Name: ReverseOpLookupAdvisories, Surface: "observation"},
+	}
+}
+
 // AgentIdentity returns the pinned ext.plugin/v1 identity for the built-in agent.
 func AgentIdentity() engine.Identity {
 	return engine.Identity{
 		ID:       "vigilante/secops-agent",
-		Revision: "v1.2.0",
-		Version:  "1.2.0",
+		Revision: "v1.3.0",
+		Version:  "1.3.0",
 	}
 }
 
@@ -254,12 +317,14 @@ func BuildGuest(handler Handler) (engine.Descriptor, *engine.Guest, error) {
 
 	revGraph := ReverseQueryGraphMethod()
 	revSource := ReverseReadSourceMethod()
+	revAdvisories := ReverseLookupAdvisoriesMethod()
 	desc.Reverse = []engine.Contract{
 		{
 			ContractRef: revGraph.Contract,
 			Operations: []engine.Operation{
 				revGraph.Operation,
 				revSource.Operation,
+				revAdvisories.Operation,
 			},
 		},
 	}
@@ -283,18 +348,19 @@ func ServeStdio(ctx context.Context, conn io.ReadWriteCloser, handler Handler) e
 }
 
 // BuildHostReverseOptions builds the ReverseOptions that allow an agent to call
-// vigilante.host@v1/query-graph and vigilante.host@v1/read-source during triage.
+// vigilante.host@v1/query-graph, read-source, and lookup-advisories during triage.
 func BuildHostReverseOptions(store graph.Store, repoIdx *repo.Index) *engine.ReverseOptions {
 	if store == nil && repoIdx == nil {
 		return nil
 	}
 	revGraph := ReverseQueryGraphMethod()
 	revSource := ReverseReadSourceMethod()
+	revAdvisories := ReverseLookupAdvisoriesMethod()
 
 	return &engine.ReverseOptions{
 		Authorize: func(_ context.Context, req engine.Request) error {
 			if req.Contract == revGraph.Contract &&
-				(req.Operation == revGraph.Operation.Name || req.Operation == revSource.Operation.Name) {
+				(req.Operation == revGraph.Operation.Name || req.Operation == revSource.Operation.Name || req.Operation == revAdvisories.Operation.Name) {
 				return nil
 			}
 			return engine.ErrDenied
@@ -353,12 +419,25 @@ func BuildHostReverseOptions(store graph.Store, repoIdx *repo.Index) *engine.Rev
 					Snippet: snippet,
 				})
 
+			case revAdvisories.Operation.Name:
+				var in AdvisoryLookupInput
+				if err := engine.Decode(req.Payload, &in); err != nil {
+					return nil, &engine.RemoteError{Code: "invalid_input", Message: "invalid advisory lookup input"}
+				}
+				advisories, err := defaultOSVClient.Lookup(ctx, in.Ecosystem, in.Name, in.Version)
+				if err != nil {
+					return nil, err
+				}
+				return json.Marshal(AdvisoryLookupOutput{Advisories: advisories})
+
 			default:
 				return nil, engine.ErrUnsupported
 			}
 		},
 	}
 }
+
+var defaultOSVClient = &deps.OSVClient{}
 
 // Handler is the function signature for an agent evaluating an EnrichedEnvelope.
 type Handler func(context.Context, EnrichedEnvelope) (Verdict, error)
@@ -376,7 +455,7 @@ type Gateway struct {
 }
 
 // NewInProcessGateway constructs an in-process ext.plugin/v1 guest and opens a
-// verified host session to it with reverse graph and codebase access.
+// verified host session with reverse graph, codebase, and advisory access.
 func NewInProcessGateway(ctx context.Context, store graph.Store, repoIdx *repo.Index, handler Handler) (*Gateway, error) {
 	desc, guest, err := BuildGuest(handler)
 	if err != nil {
@@ -423,6 +502,7 @@ func NewSessionGateway(session *engine.Session, closeFn func(context.Context) er
 }
 
 // Triage dispatches the enriched packet + system dependency graph to the agent.
+// An empty verdict means the agent accepted delivery and owns its output.
 func (g *Gateway) Triage(ctx context.Context, env EnrichedEnvelope) (Verdict, error) {
 	return author.Call(ctx, g.session, g.method, env)
 }
@@ -445,11 +525,9 @@ func (g *Gateway) Close(ctx context.Context) error {
 	return err
 }
 
-// DefaultBuiltInHandler correlates packet payloads and HTTP paths against the
-// server process identity, open sockets, loaded module dependency graph, matched
-// CVE advisories, and indexed codebase route handlers/sinks. On high-severity
-// events, it queries the live ext.system graph and reads the target source file
-// snippet via reverse callbacks.
+// DefaultBuiltInHandler is a small fallback detector for obvious payload
+// indicators. It makes no vulnerability or code reachability claim. External
+// agents remain free to investigate and return richer findings.
 func DefaultBuiltInHandler(ctx context.Context, env EnrichedEnvelope) (Verdict, error) {
 	verdict := Verdict{
 		FlowID:   env.Event.FlowID,
@@ -458,52 +536,36 @@ func DefaultBuiltInHandler(ctx context.Context, env EnrichedEnvelope) (Verdict, 
 		Summary:  "Normal flow correlated with process and dependency graph",
 	}
 
-	var reachable []string
-	for _, dep := range env.DependencyGraph.Dependencies {
-		reachable = append(reachable, dep.Ecosystem+":"+dep.Path+"@"+dep.Version)
-	}
-	if len(reachable) > 12 {
-		reachable = reachable[:12]
-	}
-	verdict.ReachableDeps = reachable
-
-	for _, adv := range env.DependencyGraph.Vulnerabilities {
-		verdict.MatchedAdvisories = append(verdict.MatchedAdvisories,
-			adv.ID+" ("+adv.Package+"@"+adv.Version+", fix: "+adv.FixedIn+")")
-	}
-
 	if env.Codebase != nil && env.Codebase.MatchedRoute != nil {
 		mr := env.Codebase.MatchedRoute
 		verdict.MatchedHandler = mr.File + ":" + itoa(mr.Line)
 	}
 
 	lowerPath := strings.ToLower(env.Event.Path)
+	if decoded, err := url.PathUnescape(lowerPath); err == nil {
+		lowerPath = decoded
+	}
+	lowerPath = strings.ReplaceAll(lowerPath, "\\", "/")
 	lowerPayload := strings.ToLower(env.Event.PayloadPreview)
 	combined := lowerPath + " " + lowerPayload
 
 	switch {
-	case strings.Contains(combined, "../") || strings.Contains(combined, "/etc/passwd") || strings.Contains(combined, "..\\"):
+	case strings.Contains(combined, "../") || strings.Contains(combined, "/etc/passwd"):
 		verdict.Severity = "high"
 		verdict.Action = "alert"
-		verdict.Summary = "Path traversal attempt targeting process " + env.ServerProcess.Name + " (" + env.ServerProcess.Executable + ")"
+		verdict.Summary = "Path traversal indicator in request to process " + env.ServerProcess.Name
+		verdict.Findings = []Finding{{Subject: "request path or preview", Claim: "path traversal indicator observed", Evidence: []string{"decoded path or payload contains a traversal marker"}, Confidence: "medium"}}
 		verdict.Recommendations = []string{
 			"Verify filesystem mount isolation on " + env.OS.Hostname,
 			"Audit file-serving handlers in module " + env.DependencyGraph.MainModule,
 		}
-	case strings.Contains(combined, "jndi:") || strings.Contains(combined, "select ") || strings.Contains(combined, "union ") || strings.Contains(combined, "<script"):
-		verdict.Severity = "critical"
-		verdict.Action = "flag-cve-reachability"
-		verdict.Summary = "Injection payload detected on socket owned by PID " + itoa(env.ServerProcess.PID) + " (" + env.ServerProcess.Name + ")"
-		verdict.Recommendations = []string{
-			"Cross-check active dependency graph (" + itoa(len(env.DependencyGraph.Dependencies)) + " modules) for parser/query sinks",
-			"Block source " + env.Event.SrcAddr + " at ingress firewall if anomalous",
-		}
-	case len(verdict.MatchedAdvisories) > 0:
+	case strings.Contains(combined, "jndi:") || strings.Contains(combined, "union select") || strings.Contains(combined, "<script"):
 		verdict.Severity = "high"
-		verdict.Action = "flag-cve-reachability"
-		verdict.Summary = "Traffic reached PID " + itoa(env.ServerProcess.PID) + " (" + env.ServerProcess.Name + ") with " + itoa(len(verdict.MatchedAdvisories)) + " vulnerable dependency advisories"
+		verdict.Action = "alert"
+		verdict.Summary = "Injection indicator in request to PID " + itoa(env.ServerProcess.PID) + " (" + env.ServerProcess.Name + ")"
+		verdict.Findings = []Finding{{Subject: "request path or preview", Claim: "injection indicator observed", Evidence: []string{"request contains a known injection marker"}, Confidence: "medium"}}
 		verdict.Recommendations = []string{
-			"Upgrade vulnerable dependencies exposed on " + env.Event.DstAddr,
+			"Review the matched handler and validate whether the input reached a query or parser sink",
 		}
 	case env.TriggerReason == "new-unseen-process-socket":
 		verdict.Severity = "low"

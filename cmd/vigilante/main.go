@@ -40,6 +40,7 @@ import (
 	"github.com/webong/vigilante/internal/block"
 	"github.com/webong/vigilante/internal/correlator"
 	"github.com/webong/vigilante/internal/decision"
+	"github.com/webong/vigilante/internal/deps"
 	"github.com/webong/vigilante/internal/flow"
 	policygate "github.com/webong/vigilante/internal/gate"
 	"github.com/webong/vigilante/internal/gateway"
@@ -104,8 +105,8 @@ func run(args []string, out io.Writer) error {
 	graphFile := fs.String("graph-file", "", "Optional path to persist the ext + vigilante graph JSON store")
 	queueSize := fs.Int("queue-size", 256, "Bounded packet mirror ring-buffer capacity")
 	supervisedAgent := fs.Bool("supervised-agent", false, "Launch agent out-of-process via ext/res/system/supervisor + jsonline IPC (equivalent to -agent supervised)")
-	agentKind := fs.String("agent", "", "Agent kind: builtin (default rule engine), cli:<command> (shell out to an external LLM/agent binary), or supervised (out-of-process via ext supervisor)")
-	agentTimeout := fs.Duration("agent-timeout", 30*time.Second, "Per-triage timeout for -agent cli")
+	agentKind := fs.String("agent", "", "Agent kind: builtin, cli:<command>, remote:<https-url>, or supervised")
+	agentTimeout := fs.Duration("agent-timeout", 30*time.Second, "Per-triage timeout for CLI or remote agent")
 	agentIPC := fs.String("agent-ipc", "", "Internal IPC address when running in -mode agent-worker")
 	configPath := fs.String("config", "", "Path to a config file (JSON or flat YAML) supplying defaults for any unset flag")
 
@@ -502,8 +503,24 @@ func run(args []string, out io.Writer) error {
 			},
 		})
 		gw, err = agent.NewInProcessGateway(ctx, store, repoIdx, cliHandler)
-	default: // "builtin"
+	case "remote":
+		remoteHandler, remoteErr := agent.NewRemoteHandler(agent.RemoteOptions{
+			URL:     cliCmd,
+			Token:   os.Getenv("VIGILANTE_AGENT_TOKEN"),
+			Timeout: *agentTimeout,
+			OnError: func(err error) {
+				fmt.Fprintln(out, "[vigilante] remote agent error:", err)
+			},
+		})
+		if remoteErr != nil {
+			return remoteErr
+		}
+		fmt.Fprintf(out, "[vigilante] remote agent: %s (timeout %s)\n", cliCmd, *agentTimeout)
+		gw, err = agent.NewInProcessGateway(ctx, store, repoIdx, remoteHandler)
+	case "", "builtin":
 		gw, err = agent.NewInProcessGateway(ctx, store, repoIdx, nil)
+	default:
+		return fmt.Errorf("unknown agent kind %q", kind)
 	}
 	if err != nil {
 		return fmt.Errorf("init ext.plugin/v1 agent gateway: %w", err)
@@ -511,16 +528,22 @@ func run(args []string, out io.Writer) error {
 	defer gw.Close(context.Background())
 
 	corr, err := correlator.New(correlator.Options{
-		SystemGraph: sysGraph,
-		Gateway:     gw,
-		Repo:        repoIdx,
-		FallbackPID: os.Getpid(),
+		SystemGraph:    sysGraph,
+		Gateway:        gw,
+		RemoteBundle:   kind == "remote",
+		AdvisoryClient: &deps.OSVClient{},
+		Repo:           repoIdx,
+		FallbackPID:    os.Getpid(),
 		OnVerdict: func(env agent.EnrichedEnvelope, v agent.Verdict) {
 			printVerdict(out, env, v)
 			// Publish the triaged flow to every sink (alert store, consoles,
 			// exporters). Publication is non-blocking: a slow sink can never
 			// stall traffic or triage.
 			if publisher != nil {
+				findings := make([]alert.Finding, 0, len(v.Findings))
+				for _, finding := range v.Findings {
+					findings = append(findings, alert.Finding{Subject: finding.Subject, Claim: finding.Claim, Evidence: finding.Evidence, Sources: finding.Sources, Confidence: finding.Confidence})
+				}
 				publisher.Publish(flow.Event{
 					Timestamp:       time.Now().UTC(),
 					FlowID:          v.FlowID,
@@ -535,6 +558,7 @@ func run(args []string, out io.Writer) error {
 					TLSFingerprint:  env.Event.TLSFingerprint,
 					Handler:         v.MatchedHandler,
 					Advisories:      v.MatchedAdvisories,
+					Findings:        findings,
 					Recommendations: v.Recommendations,
 				})
 			}

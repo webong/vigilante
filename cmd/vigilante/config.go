@@ -42,7 +42,7 @@ import (
 type Config struct {
 	// Mode: demo | http | tcp | middleware | gateway | passive | sidecar | agent-worker
 	Mode string `yaml:"mode" json:"mode"`
-	// Agent: builtin | cli:<cmd> | supervised
+	// Agent: builtin | cli:<cmd> | remote:<https-url> | supervised
 	Agent string `yaml:"agent" json:"agent"`
 	// Gateway posture: local | external:<url>
 	Gateway string `yaml:"gateway" json:"gateway"`

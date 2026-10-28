@@ -42,6 +42,7 @@ func (s AlertSink) Ingest(_ context.Context, ev Event) error {
 		Signals:        ev.Signals,
 		Handler:        ev.Handler,
 		Advisories:     ev.Advisories,
+		Findings:       ev.Findings,
 	})
 	return nil
 }

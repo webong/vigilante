@@ -52,6 +52,14 @@ func rank(s Severity) int {
 }
 
 // Record is one persisted/delivered alert.
+type Finding struct {
+	Subject    string   `json:"subject"`
+	Claim      string   `json:"claim"`
+	Evidence   []string `json:"evidence,omitempty"`
+	Sources    []string `json:"sources,omitempty"`
+	Confidence string   `json:"confidence,omitempty"`
+}
+
 type Record struct {
 	Timestamp      time.Time `json:"timestamp"`
 	FlowID         string    `json:"flow_id"`
@@ -68,6 +76,7 @@ type Record struct {
 	Rule           string    `json:"policy_rule,omitempty"` // policy rule that triggered, if any
 	Handler        string    `json:"matched_handler,omitempty"`
 	Advisories     []string  `json:"matched_advisories,omitempty"`
+	Findings       []Finding `json:"findings,omitempty"`
 }
 
 // Reader reads persisted alerts for consumers (dashboards, APIs, exporters).

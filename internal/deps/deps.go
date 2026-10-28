@@ -1,8 +1,5 @@
-// Package deps extracts application and binary dependency graphs (Go buildinfo,
-// go.mod, go.sum, npm package.json, package-lock.json, Rust Cargo.lock, Python
-// uv.lock / requirements.txt, and OS shared libraries) and matches them against
-// known vulnerability advisories so network flows can be correlated with
-// reachable CVEs in the owning process.
+// Package deps extracts application and binary dependency inventories. Advisory
+// research belongs to the triage agent, which can query a current source.
 package deps
 
 import (
@@ -15,7 +12,7 @@ import (
 	"strings"
 )
 
-// Advisory describes a known vulnerability matched against a loaded dependency.
+// Advisory is a legacy wire type retained for existing agent integrations.
 type Advisory struct {
 	ID          string `json:"id"`       // e.g. "CVE-2024-24790" or "GHSA-..."
 	Package     string `json:"package"`  // Module or package name
@@ -33,13 +30,14 @@ type Module struct {
 	Source    string `json:"source"` // "buildinfo", "go.mod", "go.sum", "package.json", "package-lock.json", "Cargo.lock", "uv.lock", "requirements.txt", "mapping"
 }
 
-// Graph summarizes the discovered application dependency graph and matched
-// vulnerability advisories for a process.
+// Graph summarizes the discovered application dependency inventory for a process.
 type Graph struct {
-	MainModule      string     `json:"main_module,omitempty"`
-	GoVersion       string     `json:"go_version,omitempty"`
-	ProjectRoot     string     `json:"project_root,omitempty"`
-	Dependencies    []Module   `json:"dependencies"`
+	MainModule   string   `json:"main_module,omitempty"`
+	GoVersion    string   `json:"go_version,omitempty"`
+	ProjectRoot  string   `json:"project_root,omitempty"`
+	Dependencies []Module `json:"dependencies"`
+	// Vulnerabilities is retained for wire compatibility. Inspect does not infer
+	// vulnerabilities from an installed package or a request to its process.
 	Vulnerabilities []Advisory `json:"vulnerabilities,omitempty"`
 }
 
@@ -130,7 +128,6 @@ func Inspect(executablePath, workingDir string, mappedFiles []string) Graph {
 		return a.Path < b.Path
 	})
 
-	out.Vulnerabilities = matchAdvisories(out.Dependencies)
 	return out
 }
 
@@ -445,83 +442,4 @@ func parseRequirementsTxt(path string) []Module {
 		}
 	}
 	return modules
-}
-
-type rule struct {
-	ecosystem   string
-	pkg         string
-	badPrefixes []string
-	advisory    Advisory
-}
-
-var builtinAdvisoryRules = []rule{
-	{
-		ecosystem:   "go",
-		pkg:         "golang.org/x/net",
-		badPrefixes: []string{"v0.0.", "v0.1.", "v0.2.", "v0.3.", "v0.4.", "v0.5.", "v0.6.", "v0.7.", "v0.8.", "v0.9.", "v0.10.", "v0.11.", "v0.12.", "v0.13.", "v0.14.", "v0.15.", "v0.16.", "v0.17.", "v0.18.", "v0.19.", "v0.20.", "v0.21.", "v0.22."},
-		advisory: Advisory{
-			ID:          "CVE-2023-45288",
-			Package:     "golang.org/x/net",
-			FixedIn:     "v0.23.0",
-			Severity:    "high",
-			Description: "HTTP/2 CONTINUATION frame flood DoS in golang.org/x/net",
-		},
-	},
-	{
-		ecosystem:   "npm",
-		pkg:         "express",
-		badPrefixes: []string{"4.17.", "4.18.", "4.19.0", "4.19.1"},
-		advisory: Advisory{
-			ID:          "CVE-2024-29041",
-			Package:     "express",
-			FixedIn:     "4.19.2",
-			Severity:    "medium",
-			Description: "Open redirect vulnerability in Express response.location()",
-		},
-	},
-	{
-		ecosystem:   "npm",
-		pkg:         "lodash",
-		badPrefixes: []string{"4.17.15", "4.17.19", "4.17.20"},
-		advisory: Advisory{
-			ID:          "CVE-2021-23337",
-			Package:     "lodash",
-			FixedIn:     "4.17.21",
-			Severity:    "high",
-			Description: "Command injection via template function in lodash",
-		},
-	},
-	{
-		ecosystem:   "pypi",
-		pkg:         "urllib3",
-		badPrefixes: []string{"1.26.", "2.0.0", "2.0.1", "2.0.2", "2.0.3", "2.0.4", "2.0.5", "2.0.6"},
-		advisory: Advisory{
-			ID:          "CVE-2023-45803",
-			Package:     "urllib3",
-			FixedIn:     "2.0.7",
-			Severity:    "medium",
-			Description: "Request body not stripped on HTTP redirect in urllib3",
-		},
-	},
-}
-
-func matchAdvisories(mods []Module) []Advisory {
-	var out []Advisory
-	for _, m := range mods {
-		cleanVer := strings.TrimLeft(m.Version, "^~=")
-		for _, r := range builtinAdvisoryRules {
-			if m.Ecosystem != r.ecosystem || m.Path != r.pkg {
-				continue
-			}
-			for _, prefix := range r.badPrefixes {
-				if strings.HasPrefix(cleanVer, prefix) || strings.HasPrefix(m.Version, prefix) {
-					adv := r.advisory
-					adv.Version = m.Version
-					out = append(out, adv)
-					break
-				}
-			}
-		}
-	}
-	return out
 }

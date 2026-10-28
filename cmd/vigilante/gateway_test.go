@@ -22,6 +22,7 @@ func TestSplitAgentArg(t *testing.T) {
 		{"builtin", "builtin", ""},
 		{"supervised", "supervised", ""},
 		{"cli:claude -p", "cli", "claude -p"},
+		{"remote:https://agent.example.com/v1/triage", "remote", "https://agent.example.com/v1/triage"},
 	}
 	for _, c := range cases {
 		kind, cmd := splitAgentArg(c.in)

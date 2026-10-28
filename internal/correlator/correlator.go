@@ -12,7 +12,6 @@ import (
 	"os"
 	"runtime"
 	"strconv"
-	"strings"
 	"sync"
 	"time"
 
@@ -20,6 +19,7 @@ import (
 	"github.com/webong/ext/res/system/graph"
 	"github.com/webong/ext/res/system/network"
 	"github.com/webong/vigilante/ext/agent"
+	"github.com/webong/vigilante/ext/redact"
 	"github.com/webong/vigilante/internal/deps"
 	"github.com/webong/vigilante/internal/repo"
 	"github.com/webong/vigilante/internal/schema"
@@ -41,23 +41,29 @@ type Options struct {
 	CacheTTL    time.Duration
 	// FallbackPID is used when inspecting a local process in environments where
 	// the target port belongs to the current or child process.
-	FallbackPID int
-	WorkingDir  string
-	OnVerdict   func(agent.EnrichedEnvelope, agent.Verdict)
+	FallbackPID    int
+	WorkingDir     string
+	OnVerdict      func(agent.EnrichedEnvelope, agent.Verdict)
+	RemoteBundle   bool
+	AdvisoryClient *deps.OSVClient
 }
 
 // Correlator maintains the fast socket-to-PID cache, refreshes host/network/process
 // context via github.com/webong/ext/res/system, projects topological facts into
 // graph.Store, and dispatches interesting flows to the agent gateway.
 type Correlator struct {
-	sysGraph    *system.Graph
-	store       graph.Store
-	gateway     *agent.Gateway
-	repoIdx     *repo.Index
-	cacheTTL    time.Duration
-	fallbackPID int
-	workingDir  string
-	onVerdict   func(agent.EnrichedEnvelope, agent.Verdict)
+	sysGraph       *system.Graph
+	store          graph.Store
+	gateway        *agent.Gateway
+	repoIdx        *repo.Index
+	cacheTTL       time.Duration
+	fallbackPID    int
+	workingDir     string
+	onVerdict      func(agent.EnrichedEnvelope, agent.Verdict)
+	remoteBundle   bool
+	advisoryClient *deps.OSVClient
+	sourceCache    map[string]string
+	research       map[string]*researchEntry
 
 	mu          sync.RWMutex
 	osContext   agent.OSContext
@@ -91,16 +97,20 @@ func New(opts Options) (*Correlator, error) {
 		}
 	}
 	return &Correlator{
-		sysGraph:    opts.SystemGraph,
-		store:       opts.SystemGraph.Store,
-		gateway:     opts.Gateway,
-		repoIdx:     opts.Repo,
-		cacheTTL:    ttl,
-		fallbackPID: opts.FallbackPID,
-		workingDir:  wd,
-		onVerdict:   opts.OnVerdict,
-		portCache:   make(map[string]ProcessEntry),
-		seenFlows:   make(map[string]uint64),
+		sysGraph:       opts.SystemGraph,
+		store:          opts.SystemGraph.Store,
+		gateway:        opts.Gateway,
+		repoIdx:        opts.Repo,
+		cacheTTL:       ttl,
+		fallbackPID:    opts.FallbackPID,
+		workingDir:     wd,
+		onVerdict:      opts.OnVerdict,
+		remoteBundle:   opts.RemoteBundle,
+		advisoryClient: opts.AdvisoryClient,
+		sourceCache:    make(map[string]string),
+		research:       make(map[string]*researchEntry),
+		portCache:      make(map[string]ProcessEntry),
+		seenFlows:      make(map[string]uint64),
 	}, nil
 }
 
@@ -174,11 +184,12 @@ func (c *Correlator) ProcessPacket(ctx context.Context, ev agent.PacketEvent) (a
 	if isNewSocket || flowCount == 1 {
 		triggerReason = "new-unseen-process-socket"
 	}
-	if isSuspiciousPayload(ev) {
-		triggerReason = "anomalous-payload-signature"
-	}
 
 	codebaseCtx := c.buildCodebaseContext(ev)
+	var advisoryResearch *agent.AdvisoryResearch
+	if c.remoteBundle && c.advisoryClient != nil {
+		advisoryResearch = c.researchSnapshot(ctx, procEntry)
+	}
 
 	commit, err := c.projectFlowToGraph(ctx, ev, procEntry, netSnap, codebaseCtx)
 	var revision uint64
@@ -187,19 +198,24 @@ func (c *Correlator) ProcessPacket(ctx context.Context, ev agent.PacketEvent) (a
 	}
 
 	envelope := agent.EnrichedEnvelope{
-		Event:           ev,
-		TriggerReason:   triggerReason,
-		OS:              osCtx,
-		ServerProcess:   procEntry.Process,
-		NetworkTopology: netSnap,
-		DependencyGraph: procEntry.Deps,
-		Codebase:        codebaseCtx,
-		GraphRevision:   revision,
+		Event:            ev,
+		TriggerReason:    triggerReason,
+		OS:               osCtx,
+		ServerProcess:    procEntry.Process,
+		NetworkTopology:  netSnap,
+		DependencyGraph:  procEntry.Deps,
+		Codebase:         codebaseCtx,
+		GraphRevision:    revision,
+		AdvisoryResearch: advisoryResearch,
 	}
 
 	verdict, err := c.gateway.Triage(ctx, envelope)
 	if err != nil {
 		return agent.Verdict{}, err
+	}
+	if verdict.Severity == "" && verdict.Action == "" && verdict.Summary == "" {
+		// The agent accepted the envelope and owns its output destination.
+		return agent.Verdict{}, nil
 	}
 
 	if verdict.Severity == "high" || verdict.Severity == "critical" {
@@ -245,7 +261,55 @@ func (c *Correlator) buildCodebaseContext(ev agent.PacketEvent) *agent.CodebaseC
 		}
 		ctx.RelevantSinks = append(ctx.RelevantSinks, s)
 	}
+	if c.remoteBundle {
+		seen := make(map[string]bool)
+		add := func(file string, line int) {
+			key := fmt.Sprintf("%s:%d", file, line)
+			if file == "" || line < 1 || seen[key] || len(ctx.SourceExcerpts) >= 3 {
+				return
+			}
+			seen[key] = true
+			start := line - 4
+			if start < 1 {
+				start = 1
+			}
+			if text := c.sourceExcerpt(file, start, line+8); text != "" {
+				ctx.SourceExcerpts = append(ctx.SourceExcerpts, agent.SourceExcerpt{File: file, StartLine: start, Text: text})
+			}
+		}
+		if ctx.MatchedRoute != nil {
+			add(ctx.MatchedRoute.File, ctx.MatchedRoute.Line)
+		}
+		for _, sink := range ctx.RelevantSinks {
+			add(sink.File, sink.Line)
+		}
+	}
 	return ctx
+}
+
+func (c *Correlator) sourceExcerpt(file string, start, end int) string {
+	key := fmt.Sprintf("%s:%d:%d", file, start, end)
+	c.mu.RLock()
+	text, ok := c.sourceCache[key]
+	c.mu.RUnlock()
+	if ok {
+		return text
+	}
+	text, err := c.repoIdx.ReadSnippet(file, start, end)
+	if err != nil {
+		return ""
+	}
+	text = redact.String(text)
+	if len(text) > 2048 {
+		text = text[:2048]
+	}
+	c.mu.Lock()
+	if len(c.sourceCache) >= 256 {
+		c.sourceCache = make(map[string]string)
+	}
+	c.sourceCache[key] = text
+	c.mu.Unlock()
+	return text
 }
 
 func (c *Correlator) projectFlowToGraph(ctx context.Context, ev agent.PacketEvent, procEntry ProcessEntry, netSnap network.Snapshot, cb *agent.CodebaseContext) (graph.Commit, error) {
@@ -450,16 +514,6 @@ func (c *Correlator) projectAlertToGraph(ctx context.Context, ev agent.PacketEve
 		},
 	})
 	return err
-}
-
-func isSuspiciousPayload(ev agent.PacketEvent) bool {
-	combined := strings.ToLower(ev.Path + " " + ev.PayloadPreview)
-	for _, needle := range []string{"../", "/etc/passwd", "jndi:", "select ", "union ", "<script"} {
-		if strings.Contains(combined, needle) {
-			return true
-		}
-	}
-	return false
 }
 
 func extractPort(addr string) string {

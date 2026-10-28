@@ -5,6 +5,8 @@ import (
 	"net"
 	"strings"
 	"testing"
+
+	"github.com/webong/vigilante/ext/agent"
 )
 
 // buildIPv4TCPFrame constructs a minimal Ethernet+IPv4+TCP frame with a payload.
@@ -44,11 +46,46 @@ func TestDecodeIPv4TCP(t *testing.T) {
 	}
 }
 
-func TestDecodeRejectsNonIPv4(t *testing.T) {
+func TestDecodeRejectsMalformedIPv6(t *testing.T) {
 	frame := make([]byte, 40)
 	binary.BigEndian.PutUint16(frame[12:14], 0x86DD) // IPv6
 	if _, ok := DecodeFrame(frame, 1514); ok {
-		t.Fatal("non-IPv4 should be rejected")
+		t.Fatal("malformed IPv6 should be rejected")
+	}
+}
+
+func TestDecodeIPv6TCPAndVLAN(t *testing.T) {
+	frame := make([]byte, 14+4+40+20+5)
+	binary.BigEndian.PutUint16(frame[12:14], 0x8100)
+	binary.BigEndian.PutUint16(frame[16:18], 0x86dd)
+	ip := frame[18:]
+	ip[0] = 0x60
+	binary.BigEndian.PutUint16(ip[4:6], 25)
+	ip[6] = 6
+	copy(ip[8:24], net.ParseIP("2001:db8::1").To16())
+	copy(ip[24:40], net.ParseIP("2001:db8::2").To16())
+	tcp := ip[40:]
+	binary.BigEndian.PutUint16(tcp[0:2], 1234)
+	binary.BigEndian.PutUint16(tcp[2:4], 443)
+	tcp[12] = 0x50
+	copy(tcp[20:], "hello")
+	ev, ok := DecodeFrame(frame, 1514)
+	if !ok || ev.SrcAddr != "[2001:db8::1]:1234" || ev.DstAddr != "[2001:db8::2]:443" || ev.PayloadPreview != "hello" {
+		t.Fatalf("unexpected decode: %+v, ok=%v", ev, ok)
+	}
+}
+
+func TestDecodeSkipsIPv4Fragments(t *testing.T) {
+	frame := buildIPv4TCPFrame(net.ParseIP("10.0.0.1"), net.ParseIP("10.0.0.2"), 1, 2, nil)
+	binary.BigEndian.PutUint16(frame[14+6:14+8], 0x2000)
+	if _, ok := DecodeFrame(frame, 1514); ok {
+		t.Fatal("fragment should be skipped without reassembly")
+	}
+}
+
+func TestMatchesPortWithIPv6(t *testing.T) {
+	if !matchesPort(agent.PacketEvent{SrcAddr: "[2001:db8::1]:1234", DstAddr: "[2001:db8::2]:443"}, []int{443}) {
+		t.Fatal("destination port should match")
 	}
 }
 
