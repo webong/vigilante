@@ -8,9 +8,15 @@
 # demo | http | tcp | middleware | gateway | passive | agent-worker
 mode: http
 
-# Agent backend: builtin | cli:<command> | supervised
+# Agent backend: builtin | cli | cli:<executable> | remote:<https-url> | supervised
 agent: builtin
 agent_timeout: 30s
+# For a local CLI agent, use agent: cli and configure argv separately:
+# agent_command: opencode
+# agent_args:
+#   - run
+#   - '{prompt}'
+# agent_input: json  # or prompt for CLIs that read the whole prompt on stdin
 
 # Gateway posture (mode: gateway): local | external:<url>
 gateway: local

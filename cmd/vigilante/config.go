@@ -43,7 +43,11 @@ type Config struct {
 	// Mode: demo | http | tcp | middleware | gateway | passive | sidecar | agent-worker
 	Mode string `yaml:"mode" json:"mode"`
 	// Agent: builtin | cli:<cmd> | remote:<https-url> | supervised
-	Agent string `yaml:"agent" json:"agent"`
+	Agent        string   `yaml:"agent" json:"agent"`
+	AgentCommand string   `yaml:"agent_command" json:"agent_command"`
+	AgentArgs    []string `yaml:"agent_args" json:"agent_args"`
+	AgentInput   string   `yaml:"agent_input" json:"agent_input"`
+	AgentDir     string   `yaml:"agent_dir" json:"agent_dir"`
 	// Gateway posture: local | external:<url>
 	Gateway string `yaml:"gateway" json:"gateway"`
 
@@ -348,6 +352,24 @@ func decodeYAML(data []byte) (Config, error) {
 			val = strings.Trim(val, `"'`)
 		}
 
+		if key == "agent_args" && val == "" {
+			block, next, err := captureBlock(lines, i+1)
+			if err != nil {
+				return Config{}, fmt.Errorf("config: agent_args: %w", err)
+			}
+			i = next - 1
+			for _, rawArg := range strings.Split(block, "\n") {
+				arg := strings.TrimSpace(stripInlineComment(rawArg))
+				if arg == "" {
+					continue
+				}
+				if !strings.HasPrefix(arg, "- ") {
+					return Config{}, fmt.Errorf("config: agent_args: expected list item, got %q", arg)
+				}
+				c.AgentArgs = append(c.AgentArgs, strings.Trim(strings.TrimSpace(strings.TrimPrefix(arg, "- ")), `"'`))
+			}
+			continue
+		}
 		// Structured sections take an indented block.
 		if val == "" && (key == "policy" || key == "actions" || key == "alerts") {
 			block, next, err := captureBlock(lines, i+1)

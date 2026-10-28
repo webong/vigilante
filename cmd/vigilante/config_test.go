@@ -81,7 +81,11 @@ func TestLoadConfigNewKeysYAML(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "vig.yaml")
 	data := "" +
 		"mode: http\n" +
-		"agent: cli:claude -p\n" +
+		"agent: cli\n" +
+		"agent_command: claude\n" +
+		"agent_args:\n" +
+		"  - -p\n" +
+		"  - '{prompt}'\n" +
 		"agent_timeout: 45s\n" +
 		"block_threshold: 5\n" +
 		"block_window: 2m\n" +
@@ -99,8 +103,8 @@ func TestLoadConfigNewKeysYAML(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if cfg.Agent != "cli:claude -p" {
-		t.Errorf("agent = %q", cfg.Agent)
+	if cfg.Agent != "cli" || cfg.AgentCommand != "claude" || len(cfg.AgentArgs) != 2 || cfg.AgentArgs[0] != "-p" || cfg.AgentArgs[1] != "{prompt}" {
+		t.Errorf("agent config = %+v", cfg)
 	}
 	if cfg.AgentTimeout.Seconds() != 45 {
 		t.Errorf("agent_timeout = %v, want 45s", cfg.AgentTimeout)

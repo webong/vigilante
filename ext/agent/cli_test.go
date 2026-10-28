@@ -3,11 +3,10 @@ package agent
 import (
 	"context"
 	"errors"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
-
-	"github.com/webong/vigilante/internal/repo"
 )
 
 func sampleEnv() EnrichedEnvelope {
@@ -55,6 +54,13 @@ func TestParseVerdictEmbeddedWithProseAndNestedBraces(t *testing.T) {
 	}
 }
 
+func TestParseVerdictAfterUnrelatedJSON(t *testing.T) {
+	v, err := ParseVerdictOutput([]byte(`{"event":"progress"}\n{"severity":"high","action":"alert","summary":"found"}`))
+	if err != nil || v.Summary != "found" {
+		t.Fatalf("verdict = %+v, %v", v, err)
+	}
+}
+
 func TestParseVerdictRejectsEmptyAndNonVerdict(t *testing.T) {
 	if _, err := ParseVerdictOutput([]byte("   ")); err == nil {
 		t.Fatal("empty should error")
@@ -66,18 +72,14 @@ func TestParseVerdictRejectsEmptyAndNonVerdict(t *testing.T) {
 
 func TestBuildPromptContainsContext(t *testing.T) {
 	env := sampleEnv()
-	env.Codebase = &CodebaseContext{
-		Source: "https://x/repo", Commit: "abc", FileCount: 10,
-		MatchedRoute: &repo.RouteHandler{Method: "GET", Pattern: "/admin", File: "main.go", Line: 42},
-	}
 	p := BuildPrompt(env)
-	for _, want := range []string{"security triage", "/admin", "PID 42", "linux/amd64", "Dependencies:", "https://x/repo"} {
+	for _, want := range []string{"security triage", "ENRICHED_ENVELOPE", "severity", "findings", "does not prove exposure"} {
 		if !strings.Contains(p, want) {
 			t.Errorf("prompt missing %q", want)
 		}
 	}
-	if !strings.Contains(p, "severity") || !strings.Contains(p, "findings") || !strings.Contains(p, "does not prove exposure") {
-		t.Error("prompt must state the output contract")
+	if strings.Contains(p, env.Event.PayloadPreview) || strings.Contains(p, env.Event.SrcAddr) {
+		t.Error("event data must stay on stdin")
 	}
 }
 
@@ -160,5 +162,51 @@ func TestCLITimeoutFallsBack(t *testing.T) {
 	})
 	if _, err := h(context.Background(), sampleEnv()); err != nil {
 		t.Fatalf("timeout must fall back, not error: %v", err)
+	}
+}
+
+func TestCLIExpandsPromptArgument(t *testing.T) {
+	var got []string
+	h := NewCLIHandler(CLIOptions{
+		Command: "fake", Args: []string{"run", "{prompt}"},
+		Run: func(_ context.Context, _ string, args ...string) ([]byte, error) {
+			got = args
+			return []byte(`{"severity":"low","action":"observe","summary":"checked"}`), nil
+		},
+	})
+	if _, err := h(context.Background(), sampleEnv()); err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 2 || got[0] != "run" || !strings.Contains(got[1], "ENRICHED_ENVELOPE") {
+		t.Fatalf("argv = %q", got)
+	}
+}
+
+func TestCLIStdoutSeparateFromDiagnostics(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("requires sh")
+	}
+	out, err := runWithStdin(context.Background(), CLIOptions{Command: "sh", Args: []string{"-c", "cat; echo diagnostic >&2"}}, []byte(`{"severity":"low"}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(out) != `{"severity":"low"}` {
+		t.Fatalf("stdout = %q", out)
+	}
+}
+
+func TestCLIPromptStdinMode(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("requires sh")
+	}
+	v, err := cliTriage(context.Background(), CLIOptions{
+		Command: "sh", Args: []string{"-c", "grep -q 'ENRICHED_ENVELOPE JSON:' && printf '{\"severity\":\"low\",\"action\":\"observe\",\"summary\":\"checked\"}'"},
+		Input: "prompt", Timeout: time.Second,
+	}, sampleEnv())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if v.Summary != "checked" || v.FlowID != "f1" {
+		t.Fatalf("verdict = %+v", v)
 	}
 }

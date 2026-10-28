@@ -106,6 +106,11 @@ func run(args []string, out io.Writer) error {
 	queueSize := fs.Int("queue-size", 256, "Bounded packet mirror ring-buffer capacity")
 	supervisedAgent := fs.Bool("supervised-agent", false, "Launch agent out-of-process via ext/res/system/supervisor + jsonline IPC (equivalent to -agent supervised)")
 	agentKind := fs.String("agent", "", "Agent kind: builtin, cli:<command>, remote:<https-url>, or supervised")
+	agentCommand := fs.String("agent-command", "", "Executable for -agent cli (argv is configured separately)")
+	agentDir := fs.String("agent-dir", "", "Working directory for CLI agent skills and configuration")
+	agentInput := fs.String("agent-input", "json", "CLI stdin format: json or prompt")
+	var agentArgs stringListFlag
+	fs.Var(&agentArgs, "agent-arg", "CLI argument; repeat for each argv element; {prompt} inserts triage instructions")
 	agentTimeout := fs.Duration("agent-timeout", 30*time.Second, "Per-triage timeout for CLI or remote agent")
 	agentIPC := fs.String("agent-ipc", "", "Internal IPC address when running in -mode agent-worker")
 	configPath := fs.String("config", "", "Path to a config file (JSON or flat YAML) supplying defaults for any unset flag")
@@ -146,6 +151,12 @@ func run(args []string, out io.Writer) error {
 
 	applyStr(set["mode"], mode, cfg.Mode)
 	applyStr(set["agent"], agentKind, cfg.Agent)
+	applyStr(set["agent-command"], agentCommand, cfg.AgentCommand)
+	applyStr(set["agent-dir"], agentDir, cfg.AgentDir)
+	applyStr(set["agent-input"], agentInput, cfg.AgentInput)
+	if !set["agent-arg"] {
+		agentArgs = append(agentArgs, cfg.AgentArgs...)
+	}
 	applyStr(set["gateway"], gatewayPosture, cfg.Gateway)
 	applyStr(set["listen"], listenAddr, cfg.Listen)
 	applyStr(set["sidecar-listen"], sidecarListen, cfg.SidecarListen)
@@ -490,13 +501,21 @@ func run(args []string, out io.Writer) error {
 			RequireChecksum: true,
 		})
 	case "cli":
+		if *agentCommand != "" {
+			cliCmd = *agentCommand
+		}
 		fmt.Fprintf(out, "[vigilante] CLI agent: %s (timeout %s)\n", orDash(cliCmd), *agentTimeout)
 		if cliCmd == "" {
-			return fmt.Errorf("-agent cli:<command> requires a command")
+			return fmt.Errorf("-agent cli requires -agent-command or cli:<command>")
+		}
+		if *agentInput != "json" && *agentInput != "prompt" {
+			return fmt.Errorf("-agent-input must be json or prompt")
 		}
 		cliHandler := agent.NewCLIHandler(agent.CLIOptions{
 			Command: cliCmd,
-			Args:    []string{},
+			Args:    []string(agentArgs),
+			Input:   *agentInput,
+			Dir:     *agentDir,
 			Timeout: *agentTimeout,
 			OnError: func(err error) {
 				fmt.Fprintln(out, "[vigilante] cli agent error (falling back to builtin):", err)
@@ -841,6 +860,11 @@ func obsQueueProbe() obs.QueueCounters {
 func obsQueueStats(probe func() obs.QueueCounters) func() obs.QueueCounters {
 	return probe
 }
+
+type stringListFlag []string
+
+func (f *stringListFlag) String() string         { return strings.Join(*f, ", ") }
+func (f *stringListFlag) Set(value string) error { *f = append(*f, value); return nil }
 
 // splitAgentArg parses an -agent value of the form "kind" or "cli:<command>",
 // returning the kind and any attached command.

@@ -25,12 +25,17 @@ type CLIOptions struct {
 	Command string
 	// Args are appended after Command (the envelope JSON goes on stdin).
 	Args []string
+	// Dir is the agent's working directory, where it can discover project skills
+	// and configuration. Empty uses Vigilante's working directory.
+	Dir string
+	// Input is "json" (default) or "prompt". Prompt mode writes the triage
+	// instructions and envelope to stdin for CLIs that use stdin as a prompt.
+	Input string
 	// Env entries (KEY=VALUE) are appended to the inherited environment.
 	Env []string
 	// Timeout bounds one triage invocation (default 30s).
 	Timeout time.Duration
-	// Run, when non-nil, replaces command execution (tests). Its combined
-	// output is parsed as the Verdict when present.
+	// Run, when non-nil, replaces command execution (tests).
 	Run Runner
 	// OnError, when set, is invoked with the underlying command error.
 	OnError func(error)
@@ -63,6 +68,20 @@ func cliTriage(ctx context.Context, opts CLIOptions, env EnrichedEnvelope) (Verd
 	if err != nil {
 		return Verdict{}, fmt.Errorf("cli agent: marshal envelope: %w", err)
 	}
+	prompt := BuildPrompt(env)
+	input := payload
+	switch opts.Input {
+	case "", "json":
+	case "prompt":
+		input = []byte(prompt + "\nENRICHED_ENVELOPE JSON:\n" + string(payload) + "\n")
+	default:
+		return Verdict{}, fmt.Errorf("cli agent: unknown input mode %q", opts.Input)
+	}
+	args := make([]string, len(opts.Args))
+	for i, arg := range opts.Args {
+		args[i] = strings.ReplaceAll(arg, "{prompt}", prompt)
+	}
+	opts.Args = args
 
 	runCtx, cancel := context.WithTimeout(ctx, opts.Timeout)
 	defer cancel()
@@ -71,7 +90,7 @@ func cliTriage(ctx context.Context, opts CLIOptions, env EnrichedEnvelope) (Verd
 	if opts.Run != nil {
 		out, err = opts.Run(runCtx, opts.Command, opts.Args...)
 	} else {
-		out, err = runWithStdin(runCtx, opts, payload)
+		out, err = runWithStdin(runCtx, opts, input)
 	}
 	if err != nil {
 		return Verdict{}, fmt.Errorf("cli agent: %s: %w", opts.Command, err)
@@ -90,15 +109,22 @@ func cliTriage(ctx context.Context, opts CLIOptions, env EnrichedEnvelope) (Verd
 	return verdict, nil
 }
 
-// runWithStdin invokes the command with the envelope JSON on stdin and returns
-// its combined output.
+// runWithStdin invokes the command with input on stdin. Diagnostics on stderr
+// are kept separate from the agent's final answer on stdout.
 func runWithStdin(ctx context.Context, opts CLIOptions, stdin []byte) ([]byte, error) {
 	cmd := exec.CommandContext(ctx, opts.Command, opts.Args...)
+	cmd.Dir = opts.Dir
 	cmd.Stdin = bytes.NewReader(stdin)
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
 	if len(opts.Env) > 0 {
 		cmd.Env = append(os.Environ(), opts.Env...)
 	}
-	return cmd.CombinedOutput()
+	if err := cmd.Run(); err != nil {
+		return nil, fmt.Errorf("%w: %s", err, strings.TrimSpace(stderr.String()))
+	}
+	return stdout.Bytes(), nil
 }
 
 // ParseVerdictOutput extracts a Verdict JSON object from command output. It
@@ -145,10 +171,11 @@ func tryVerdict(b []byte) (Verdict, bool) {
 	return v, true
 }
 
-// extractVerdict finds the first balanced JSON object in s that unmarshals to a
-// valid Verdict, correctly skipping braces inside strings.
+// extractVerdict finds a balanced JSON verdict object, skipping unrelated JSON
+// objects and braces inside strings.
 func extractVerdict(s string) (Verdict, bool) {
 	depth := 0
+	start := -1
 	inStr := false
 	esc := false
 	for i := 0; i < len(s); i++ {
@@ -168,11 +195,17 @@ func extractVerdict(s string) (Verdict, bool) {
 		case '"':
 			inStr = true
 		case '{':
+			if depth == 0 {
+				start = i
+			}
 			depth++
 		case '}':
+			if depth == 0 {
+				continue
+			}
 			depth--
 			if depth == 0 {
-				if v, ok := tryVerdict([]byte(s[:i+1])); ok {
+				if v, ok := tryVerdict([]byte(s[start : i+1])); ok {
 					return v, true
 				}
 				depth = 0
@@ -182,10 +215,9 @@ func extractVerdict(s string) (Verdict, bool) {
 	return Verdict{}, false
 }
 
-// BuildPrompt renders a human-readable triage brief for an external CLI/LLM
-// agent. It is pure and deterministic so it can be unit-tested. The envelope
-// JSON itself is delivered on stdin; this prompt provides the instructions.
-func BuildPrompt(env EnrichedEnvelope) string {
+// BuildPrompt returns agent instructions for a CLI prompt argument. Event data
+// stays on stdin so it is not exposed in the process argument list.
+func BuildPrompt(_ EnrichedEnvelope) string {
 	var b strings.Builder
 	b.WriteString("You are a security triage agent for a live network gateway.\n")
 	b.WriteString("Analyze the ENRICHED_ENVELOPE JSON provided on stdin. If Vigilante should handle your verdict, respond with ONLY a JSON object:\n")
@@ -193,23 +225,6 @@ func BuildPrompt(env EnrichedEnvelope) string {
 	b.WriteString("\"action\":\"your recommended action\",\"summary\":\"...\",\n")
 	b.WriteString("\"findings\":[{\"subject\":\"...\",\"claim\":\"...\",\"evidence\":[\"...\"],\"sources\":[\"...\"],\"confidence\":\"...\"}],\"recommendations\":[\"...\"]}\n")
 	b.WriteString("Investigate independently. An installed dependency does not prove exposure or reachability. State uncertainty and cite evidence for vulnerability claims.\n\n")
-	b.WriteString("If your agent stores or delivers its own result, it may exit successfully without output.\n\n")
-	fmt.Fprintf(&b, "Event: %s %s from %s -> %s\n", env.Event.Method, env.Event.Path, env.Event.SrcAddr, env.Event.DstAddr)
-	fmt.Fprintf(&b, "Trigger: %s\n", env.TriggerReason)
-	fmt.Fprintf(&b, "Process: %s (PID %d, %s)\n", env.ServerProcess.Name, env.ServerProcess.PID, env.ServerProcess.Executable)
-	fmt.Fprintf(&b, "OS: %s/%s host=%s\n", env.OS.OS, env.OS.Arch, env.OS.Hostname)
-	fmt.Fprintf(&b, "Dependencies: %d inventoried modules (advisory status not pre-judged)\n",
-		len(env.DependencyGraph.Dependencies))
-	if env.Codebase != nil {
-		fmt.Fprintf(&b, "Codebase: %s (commit %s, %d files)\n", env.Codebase.Source, env.Codebase.Commit, env.Codebase.FileCount)
-		if env.Codebase.MatchedRoute != nil {
-			fmt.Fprintf(&b, "Matched route: %s %s -> %s:%d\n",
-				env.Codebase.MatchedRoute.Method, env.Codebase.MatchedRoute.Pattern,
-				env.Codebase.MatchedRoute.File, env.Codebase.MatchedRoute.Line)
-		}
-	}
-	if env.Event.PayloadPreview != "" {
-		fmt.Fprintf(&b, "Payload preview: %s\n", env.Event.PayloadPreview)
-	}
+	b.WriteString("If your agent stores or delivers its own result, it may exit successfully without output.\n")
 	return b.String()
 }
