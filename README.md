@@ -8,7 +8,7 @@ Run it three ways:
 - **As a passive sensor** on a network interface — no forwarding, just watching.
 - **As an embedded tap** inside your Go HTTP server.
 
-Every flow is enriched with live OS, process, socket, dependency-graph, and codebase context (from [`webong/ext`](https://github.com/webong/ext)), then triaged by a pluggable agent. Verdicts can enforce allow/deny/block policy and are delivered to a JSONL store, a webhook, or an upstream gateway.
+Every flow is enriched with live OS, process, socket, dependency-graph, and codebase context, then triaged by a pluggable agent. Verdicts can enforce allow/deny/block policy and are delivered to a JSONL store, a webhook, or an upstream gateway.
 
 ## Quick start
 
@@ -53,7 +53,7 @@ Linux (`AF_PACKET`), macOS (system `tcpdump`), and Windows (npcap `Packet.dll`) 
 
 ```sh
 # public, any host
--repo https://github.com/webong/ext
+-repo https://github.com/your-org/your-service
 -repo git@gitlab.internal:platform/api.git
 
 # private — HTTPS token (handed to git via a private GIT_ASKPASS helper, never in argv or .git/config)
@@ -195,7 +195,7 @@ Traffic hits the tap, is mirrored non-blockingly into a queue, and enriched with
 | --- | --- |
 | Sensor tap + passive capture | `ext/tap`, `ext/redact` |
 | Agent gateway + backends | `ext/agent` |
-| OS/process/socket + network topology | `github.com/webong/ext/res/system` (+ `network`) |
+| OS/process/socket + network topology | `res/system` (+ `res/system/network`) |
 | Dependency graph + CVE matching | `internal/deps` |
 | Codebase/Git indexer | `internal/repo` |
 | Policy, block, alerts, status | `internal/policy`, `internal/block`, `internal/alert`, `internal/status` |
