@@ -6,6 +6,13 @@ on:
   pull_request:
 
 jobs:
+  linux-integration:
+    name: Isolated NFQUEUE and TLS decoding
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: docker build -t vigilante-integration -f deploy/test/Dockerfile .
+      - run: docker run --rm --cap-add NET_ADMIN --cap-add NET_RAW vigilante-integration
   test:
     name: Build, vet, test
     runs-on: ubuntu-latest

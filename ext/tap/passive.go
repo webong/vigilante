@@ -210,7 +210,23 @@ func DecodeFrame(frame []byte, snapLen int) (agent.PacketEvent, bool) {
 		payload = bounded(transport[8:], snapLen)
 		protocol = "udp"
 	default:
-		return agent.PacketEvent{}, false
+		protocol = fmt.Sprintf("ip-%d", proto)
+		switch proto {
+		case 1:
+			protocol = "icmp"
+		case 58:
+			protocol = "icmpv6"
+		case 132:
+			protocol = "sctp"
+		case 47:
+			protocol = "gre"
+		case 50:
+			protocol = "esp"
+		case 51:
+			protocol = "ah"
+		}
+		payloadBytes = len(transport)
+		payload = bounded(transport, snapLen)
 	}
 
 	ev := agent.PacketEvent{
@@ -225,6 +241,9 @@ func DecodeFrame(frame []byte, snapLen int) (agent.PacketEvent, bool) {
 	}
 	if proto == 6 {
 		ev.TCPSequence = binary.BigEndian.Uint32(transport[4:8])
+	}
+	if proto != 6 && proto != 17 {
+		ev.SrcAddr, ev.DstAddr, ev.TargetAddr = srcIP, dstIP, dstIP
 	}
 	ev.Redact()
 	return ev, true

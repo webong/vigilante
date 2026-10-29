@@ -177,6 +177,135 @@ vigilante -config vigilante.yaml
 
 The legacy flat keys (`policy: <path>`, `action_allow`, `action_ttl`, `alert_file`, `alert_min_severity`, …) still work; the inline blocks are just a more readable way to set the same values.
 
+## Placement commands
+
+The public placement names are `passive` (interface observation), `reverse`
+(explicit HTTP or TCP proxy), `middle` (decision sidecar for an existing ingress),
+and `inline` (Linux transparent packet interception). Existing `-mode` values
+remain compatible. Embedded Go middleware remains available through the Go API.
+
+```sh
+vigilante run passive -passive-iface eth0
+vigilante run reverse -protocol http -listen :8080 -target http://localhost:3000
+vigilante run reverse -protocol tcp -listen :5433 -target localhost:5432
+vigilante run middle -sidecar-listen 127.0.0.1:9090
+vigilante eval
+```
+
+### Linux inline interception
+
+`vigilante run inline -inline-queue 100 -policy policy.yaml` consumes NFQUEUE
+100 and requires root or CAP_NET_ADMIN. Applications keep their original
+addresses. An operator must configure netfilter to queue the desired traffic.
+For example, on a Linux test host, this selects inbound TCP port 8080:
+
+```sh
+sudo nft add table inet vigilante_inline
+sudo nft 'add chain inet vigilante_inline input { type filter hook input priority 0; policy accept; }'
+sudo nft 'add rule inet vigilante_inline input tcp dport 8080 queue num 100 bypass'
+sudo vigilante run inline -inline-queue 100 -policy policy.yaml
+# Remove this specific interception table when finished:
+sudo nft delete table inet vigilante_inline
+```
+
+`bypass` allows selected traffic when no queue consumer is running. With a
+consumer attached, packets wait for its verdict; queue overflow can drop packets.
+Scope rules carefully and keep management traffic outside the queue.
+Use a forward-hook chain to inspect routed traffic instead of traffic destined
+for the local host. No firewall rules are installed or removed by Vigilante.
+
+Inline evaluates source-IP policy and live enforcement decisions before decoding
+the selected IP transport, including fragments. All IP protocols are selected by
+default. Set `-transports tcp,udp,icmp,icmpv6` (or `transports:` in config) to
+restrict inspection and enforcement; unselected protocols are accepted.
+Names also include SCTP, GRE, ESP and AH; numeric IDs cover other IP protocols.
+Unknown protocols produce generic payload observations, not application parsing.
+NFQUEUE handles IP traffic; Ethernet-only protocols such as ARP are outside this backend.
+
+IPv4 and IPv6 fragments are assembled into inspection copies with a maximum of
+128 concurrent datagrams, 64KiB per datagram, and a 30-second lifetime. Overlaps
+discard the assembly; incomplete or rejected assemblies produce no payload
+observation, but source policy still applies to each original fragment.
+Contiguous TCP payloads form bounded rolling previews; this is not full TCP
+reconstruction with out-of-order buffering or HTTP message parsing.
+Use CIDR-only policies: HTTP paths, headers and bodies are not reconstructed.
+TLS stays encrypted. Observations enter the bounded agent queue; agent latency never
+holds a packet. An agent response can affect later traffic through configured
+actions. Remote-host process and dependency context still requires collection
+on those hosts.
+
+## Optional plaintext and TLS context
+
+Use `reverse` with `-tls-cert` and `-tls-key` to terminate TLS for a service
+you operate. An application or existing TLS proxy can instead POST a plaintext
+`RequestMeta` descriptor to the authenticated `middle` sidecar's
+`/v1/observe` endpoint. This includes method, path, headers, source address,
+and an optional bounded body preview.
+
+For captured TLS, install TShark 4.6 or newer with HTTP/3 support locally and arrange for the application TLS
+library to export session secrets in NSS key-log format. A certificate private
+key alone cannot decrypt modern TLS sessions. The built-in decoder adapter
+uses TShark's TCP/TLS and QUIC reassembly and emits HTTP/1, HTTP/2, and HTTP/3
+request observations plus ClientHello SNI metadata. Startup checks the required
+HTTP/3 header and stream-ID fields:
+
+```sh
+# Decode a saved capture with its matching session secrets:
+vigilante run passive -capture-file traffic.pcap -tls-keylog sessions.keys
+# Observe live decrypted requests:
+vigilante run passive -passive-iface eth0 -decode-tls -tls-keylog sessions.keys
+# Add the same observation producer beside NFQUEUE enforcement:
+vigilante run inline -inline-queue 100 -passive-iface eth0 -decode-tls -tls-keylog sessions.keys
+```
+
+Live capture must see the handshake and required TCP records. Missing keys or
+missing packets can leave only metadata; plaintext is not inferred from
+ciphertext. QUIC also requires the handshake and matching TLS session secrets.
+HTTP/2 and HTTP/3 observations carry `stream_id` alongside `flow_id`; separate
+HEADERS and DATA frames produce separate observations. Bodies are bounded,
+redacted previews, not complete reconstructed transactions. Multiple streams
+in one packet remain separate. This maps HTTP over QUIC, not arbitrary QUIC
+application protocols. Header compression must be decodable from the capture.
+The TShark path replaces the raw passive producer; inline keeps its raw producer.
+Inline transport selection applies to NFQUEUE enforcement, not the independent
+TShark capture. The TLS producer never supplies synchronous packet verdicts.
+
+For other protocols or tools, provide a local executable that owns capture and
+decryption and emits one `PacketEvent` JSON object per stdout line:
+
+```sh
+vigilante run passive -decoder-command /opt/bin/my-decoder -decoder-arg=--jsonl
+```
+
+Records require source and destination addresses. Include protocol, timestamp,
+method/path, headers and payload preview when available. Records are capped at
+1 MiB; payload previews are redacted then limited to 4 KiB. Sensitive headers
+are masked. Stderr and invalid output are never forwarded to the agent. Events
+carry `observation_source` and `visibility` so agents can distinguish metadata
+from supplied application plaintext. A custom decoder is a trusted local tool:
+never emit session secrets or credentials as event fields.
+
+Config keys are `decode_tls`, `tls_keylog`, `capture_file`,
+`decoder_command`, and `decoder_args`. To retrieve a saved key-log snapshot
+through ext's CTX credential client, use
+`-tls-keylog-credential space:item` (`tls_keylog_credential` in config).
+This requires a declared credential dependency and a CTX host. Vigilante writes
+the snapshot to a temporary file with owner-only permissions, clears its byte
+buffer, and removes the file when decoding ends. For continuously exported
+secrets, use `tls_keylog` instead. Secret bytes never enter the event contract.
+
+### Isolated Linux integration tests
+
+```sh
+docker build -t vigilante-integration -f deploy/test/Dockerfile .
+docker run --rm --cap-add NET_ADMIN --cap-add NET_RAW vigilante-integration
+```
+
+These tests create firewall rules only in the container network namespace.
+They exercise real NFQUEUE allow/drop decisions, TLS 1.2/1.3 decryption with
+session keys, HTTP/2 and HTTP/3 request/body stream association, redaction,
+and the absence of plaintext without keys.
+
 ## Policy & blocking
 
 Policy gates requests before forwarding. The first match wins; unmatched requests are allowed (deny is opt-in). Loopback and unspecified addresses are never blocked.

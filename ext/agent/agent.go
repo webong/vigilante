@@ -46,20 +46,23 @@ const (
 // PacketEvent represents a non-blocking mirrored packet or L7 request sample
 // cloned off the primary network stack.
 type PacketEvent struct {
-	FlowID          string            `json:"flow_id"`
-	Timestamp       time.Time         `json:"timestamp"`
-	Protocol        string            `json:"protocol"` // "tcp", "udp", "http"
-	SrcAddr         string            `json:"src_addr"`
-	DstAddr         string            `json:"dst_addr"`
-	TargetAddr      string            `json:"target_addr"` // Upstream backend address
-	Method          string            `json:"method,omitempty"`
-	Path            string            `json:"path,omitempty"`
-	Headers         map[string]string `json:"headers,omitempty"`
-	TLSFingerprint  string            `json:"tls_fingerprint,omitempty"`
-	PayloadPreview  string            `json:"payload_preview,omitempty"`
-	PayloadBytes    int               `json:"payload_bytes"`
-	TCPSequence     uint32            `json:"-"` // passive sensor stream preview only
-	PreviewComplete bool              `json:"-"`
+	ObservationSource string            `json:"observation_source,omitempty"`
+	Visibility        string            `json:"visibility,omitempty"`
+	FlowID            string            `json:"flow_id"`
+	StreamID          string            `json:"stream_id,omitempty"`
+	Timestamp         time.Time         `json:"timestamp"`
+	Protocol          string            `json:"protocol"` // "tcp", "udp", "http"
+	SrcAddr           string            `json:"src_addr"`
+	DstAddr           string            `json:"dst_addr"`
+	TargetAddr        string            `json:"target_addr"` // Upstream backend address
+	Method            string            `json:"method,omitempty"`
+	Path              string            `json:"path,omitempty"`
+	Headers           map[string]string `json:"headers,omitempty"`
+	TLSFingerprint    string            `json:"tls_fingerprint,omitempty"`
+	PayloadPreview    string            `json:"payload_preview,omitempty"`
+	PayloadBytes      int               `json:"payload_bytes"`
+	TCPSequence       uint32            `json:"-"` // passive sensor stream preview only
+	PreviewComplete   bool              `json:"-"`
 }
 
 // Redact scrubs secrets (JWTs, API keys, bearer/basic auth, secret key-values,

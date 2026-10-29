@@ -40,6 +40,14 @@ import (
 // `policy:` also still accepts a path string, and the flat `action_*` /
 // `alert_*` keys remain supported.
 type Config struct {
+	DecoderCommand      string   `yaml:"decoder_command" json:"decoder_command"`
+	DecoderArgs         []string `yaml:"decoder_args" json:"decoder_args"`
+	TLSKeyLog           string   `yaml:"tls_keylog" json:"tls_keylog"`
+	TLSKeyLogCredential string   `yaml:"tls_keylog_credential" json:"tls_keylog_credential"`
+	CaptureFile         string   `yaml:"capture_file" json:"capture_file"`
+	DecodeTLS           *bool    `yaml:"decode_tls" json:"decode_tls"`
+	Protocol            string   `yaml:"protocol" json:"protocol"`
+	Transports          string   `yaml:"transports" json:"transports"`
 	// Mode: demo | http | tcp | middleware | gateway | passive | sidecar | agent-worker
 	Mode string `yaml:"mode" json:"mode"`
 	// Agent: builtin | cli:<cmd> | remote:<https-url> | supervised
@@ -377,7 +385,7 @@ func decodeYAML(data []byte) (Config, error) {
 			val = strings.Trim(val, `"'`)
 		}
 
-		if key == "agent_args" && val == "" {
+		if (key == "agent_args" || key == "decoder_args") && val == "" {
 			block, next, err := captureBlock(lines, i+1)
 			if err != nil {
 				return Config{}, fmt.Errorf("config: agent_args: %w", err)
@@ -391,7 +399,12 @@ func decodeYAML(data []byte) (Config, error) {
 				if !strings.HasPrefix(arg, "- ") {
 					return Config{}, fmt.Errorf("config: agent_args: expected list item, got %q", arg)
 				}
-				c.AgentArgs = append(c.AgentArgs, strings.Trim(strings.TrimSpace(strings.TrimPrefix(arg, "- ")), `"'`))
+				value := strings.Trim(strings.TrimSpace(strings.TrimPrefix(arg, "- ")), `"'`)
+				if key == "decoder_args" {
+					c.DecoderArgs = append(c.DecoderArgs, value)
+				} else {
+					c.AgentArgs = append(c.AgentArgs, value)
+				}
 			}
 			continue
 		}

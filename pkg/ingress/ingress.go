@@ -185,16 +185,18 @@ func (d *Decider) Observe(meta RequestMeta) {
 		return
 	}
 	ev := agent.PacketEvent{
-		Timestamp:      time.Now().UTC(),
-		Protocol:       "http",
-		SrcAddr:        meta.RemoteAddr,
-		DstAddr:        d.cfg.ListenAddr,
-		TargetAddr:     d.cfg.TargetAddr,
-		Method:         meta.Method,
-		Path:           meta.Path,
-		Headers:        meta.Headers,
-		PayloadPreview: meta.BodyPreview,
-		PayloadBytes:   meta.BodyBytes,
+		ObservationSource: "ingress",
+		Visibility:        "application-plaintext",
+		Timestamp:         time.Now().UTC(),
+		Protocol:          "http",
+		SrcAddr:           meta.RemoteAddr,
+		DstAddr:           d.cfg.ListenAddr,
+		TargetAddr:        d.cfg.TargetAddr,
+		Method:            meta.Method,
+		Path:              meta.Path,
+		Headers:           meta.Headers,
+		PayloadPreview:    meta.BodyPreview,
+		PayloadBytes:      meta.BodyBytes,
 	}
 	if meta.Query != "" {
 		ev.Path += "?" + meta.Query

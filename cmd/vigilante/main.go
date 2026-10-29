@@ -59,10 +59,21 @@ func main() {
 }
 
 func run(args []string, out io.Writer) error {
+	args = normalizeCommand(args)
 	fs := flag.NewFlagSet("vigilante", flag.ContinueOnError)
 	fs.SetOutput(out)
 
-	mode := fs.String("mode", "demo", "Execution mode: demo, http, tcp, middleware, gateway, passive, sidecar, eval, or agent-worker")
+	mode := fs.String("mode", "demo", "Placement: passive, reverse, middle, inline; utilities: demo, eval; legacy modes remain supported")
+	protocol := fs.String("protocol", "http", "Protocol for reverse mode: http or tcp")
+	decoderCommand := fs.String("decoder-command", "", "Local decoder executable emitting PacketEvent JSONL")
+	var decoderArgs stringListFlag
+	fs.Var(&decoderArgs, "decoder-arg", "Decoder argv element (repeatable)")
+	tlsKeyLog := fs.String("tls-keylog", "", "Local application-exported TLS session key log for TShark")
+	tlsKeyCredential := fs.String("tls-keylog-credential", "", "CTX credential space:item containing a TLS key-log snapshot")
+	captureFile := fs.String("capture-file", "", "PCAP/PCAPNG to decode with TShark in passive mode")
+	decodeTLS := fs.Bool("decode-tls", false, "Enable local TShark observation alongside inline or instead of passive capture")
+	inlineQueue := fs.Int("inline-queue", 100, "Linux NFQUEUE number for inline interception")
+	transports := fs.String("transports", "all", "Inline IP protocols to inspect and enforce: all or tcp,udp,icmp,icmpv6,sctp,gre,esp,ah or numeric IDs")
 	passiveIface := fs.String("passive-iface", "", "Interface to passively sniff in -mode passive (e.g. eth0; requires root/CAP_NET_RAW)")
 	passivePorts := fs.String("passive-ports", "", "Comma-separated ports to capture in -mode passive (empty = all)")
 	listenAddr := fs.String("listen", "127.0.0.1:8080", "Address for vigilante middleware to listen on")
@@ -162,6 +173,16 @@ func run(args []string, out io.Writer) error {
 		}
 	}
 	applyStr(set["mode"], mode, cfg.Mode)
+	applyStr(set["protocol"], protocol, cfg.Protocol)
+	applyStr(set["decoder-command"], decoderCommand, cfg.DecoderCommand)
+	applyStr(set["tls-keylog"], tlsKeyLog, cfg.TLSKeyLog)
+	applyStr(set["tls-keylog-credential"], tlsKeyCredential, cfg.TLSKeyLogCredential)
+	applyStr(set["capture-file"], captureFile, cfg.CaptureFile)
+	applyBool(set["decode-tls"], decodeTLS, cfg.DecodeTLS)
+	if !set["decoder-arg"] {
+		decoderArgs = append(decoderArgs, cfg.DecoderArgs...)
+	}
+	applyStr(set["transports"], transports, cfg.Transports)
 	applyStr(set["agent"], agentKind, cfg.Agent)
 	applyStr(set["agent-command"], agentCommand, cfg.AgentCommand)
 	applyStr(set["agent-dir"], agentDir, cfg.AgentDir)
@@ -238,6 +259,26 @@ func run(args []string, out io.Writer) error {
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
+	decoderEnabled := *decodeTLS || *tlsKeyLog != "" || *captureFile != "" || *decoderCommand != "" || *tlsKeyCredential != ""
+	if decoderEnabled && *mode != "passive" && *mode != "inline" {
+		return fmt.Errorf("decoder options require passive or inline mode")
+	}
+	if *mode == "inline" && *captureFile != "" {
+		return fmt.Errorf("capture-file requires passive mode")
+	}
+	switch *mode {
+	case "reverse":
+		if *protocol != "http" && *protocol != "tcp" {
+			return fmt.Errorf("reverse protocol must be http or tcp")
+		}
+		*mode = *protocol
+	case "middle":
+		*mode = "sidecar"
+	case "inline":
+		if *inlineQueue < 0 || *inlineQueue > 65535 {
+			return fmt.Errorf("inline queue must be between 0 and 65535")
+		}
+	}
 
 	if *mode == "eval" {
 		return runEval(ctx, out, *evalCorpus, *evalJSON, *evalMinRecall, *evalMaxFPR)
@@ -678,6 +719,25 @@ func run(args []string, out io.Writer) error {
 	}
 
 	switch *mode {
+	case "inline":
+		selected, err := tap.ParseProtocols(*transports)
+		if err != nil {
+			return err
+		}
+		if decoderEnabled {
+			go func() {
+				err := tap.RunDecoder(ctx, tap.DecoderOptions{Command: *decoderCommand, Args: decoderArgs, Interface: *passiveIface, KeyLogFile: *tlsKeyLog, KeyLogCredential: *tlsKeyCredential}, func(ev agent.PacketEvent) { _, _ = corr.ProcessPacket(ctx, ev) })
+				if err != nil {
+					fmt.Fprintf(out, "[vigilante] optional decoder stopped: %v; network enforcement remains active\n", err)
+				}
+			}()
+		}
+		queue := tap.NewMirrorQueue(*queueSize)
+		queue.SetSampleRate(*sampleRate)
+		registerQueue(queue)
+		queue.Drain(ctx, 2, func(ctx context.Context, ev agent.PacketEvent) { _, _ = corr.ProcessPacket(ctx, ev) })
+		fmt.Fprintf(out, "[vigilante] inline NFQUEUE %d; install scoped netfilter queue rules to select traffic\n", *inlineQueue)
+		return tap.RunInline(ctx, uint16(*inlineQueue), queue, polGate, selected)
 	case "demo":
 		return runDemo(ctx, out, corr, store, *supervisedAgent, *sampleRate)
 	case "http":
@@ -705,6 +765,13 @@ func run(args []string, out io.Writer) error {
 		}
 		return runGatewayMode(ctx, out, corr, *listenAddr, *targetAddr, *plannerURL, *plannerToken, *tlsCert, *tlsKey, *queueSize, polGate, alertStore, *sampleRate, gwPosture, gwExternal, obsBridge, obsMetrics)
 	case "passive":
+		if decoderEnabled {
+			iface := *passiveIface
+			if *captureFile != "" {
+				iface = ""
+			}
+			return tap.RunDecoder(ctx, tap.DecoderOptions{Command: *decoderCommand, Args: decoderArgs, Interface: iface, CaptureFile: *captureFile, KeyLogFile: *tlsKeyLog, KeyLogCredential: *tlsKeyCredential}, func(ev agent.PacketEvent) { _, _ = corr.ProcessPacket(ctx, ev) })
+		}
 		return runPassiveMode(ctx, out, corr, *passiveIface, *passivePorts, *queueSize, *sampleRate, alertStore, obsBridge, obsMetrics)
 	default:
 		return fmt.Errorf("unsupported mode %q (choose demo, http, tcp, middleware, gateway, passive, sidecar, eval, or agent-worker)", *mode)
