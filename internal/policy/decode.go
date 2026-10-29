@@ -43,12 +43,17 @@ func decodeYAMLSubset(data []byte) (Config, error) {
 	inRules := false
 	inDeny := false
 	pendingField := "" // list field that subsequent "- item" lines append to
+	var pendingTarget *Rule
+	inNot := false
+	notIndent := 0
 
 	flushRule := func() {
 		if current != nil {
 			cfg.Rules = append(cfg.Rules, *current)
 			current = nil
 		}
+		pendingField, pendingTarget = "", nil
+		inNot = false
 	}
 
 	for _, raw := range lines {
@@ -91,16 +96,16 @@ func decodeYAMLSubset(data []byte) (Config, error) {
 				if item == "" {
 					continue
 				}
-				if pendingField != "" && !strings.Contains(item, ":") {
-					// Nested list item for the pending field (e.g. "- /admin/*").
-					if err := appendField(current, pendingField, strings.Trim(item, `"'`)); err != nil {
+				if pendingField != "" && !isRuleKey(item) {
+					// Nested list item for the pending field (e.g. "- /admin/*"
+					// or a query pattern such as "- *jndi:*").
+					if err := appendField(pendingTarget, pendingField, strings.Trim(item, `"'`)); err != nil {
 						return Config{}, err
 					}
 					continue
 				}
 				// Inline "- key: value" starts a new rule.
 				flushRule()
-				pendingField = ""
 				current = &Rule{}
 				if err := applyRuleField(current, item); err != nil {
 					return Config{}, err
@@ -134,19 +139,40 @@ func decodeYAMLSubset(data []byte) (Config, error) {
 		if current == nil {
 			current = &Rule{}
 		}
+		if inNot && indent <= notIndent {
+			inNot = false
+		}
+		if key == "not" {
+			if val != "" {
+				return Config{}, fmt.Errorf("policy: rule %q: not must be a nested matcher block", current.Name)
+			}
+			if inNot {
+				return Config{}, fmt.Errorf("policy: rule %q: nested not blocks require JSON", current.Name)
+			}
+			current.Not = &Rule{}
+			inNot, notIndent = true, indent
+			pendingField, pendingTarget = "", nil
+			continue
+		}
+		target := current
+		if inNot && indent > notIndent {
+			target = current.Not
+		}
 		// Nested list header ("paths:") with no inline value: the following
 		// "- item" lines are appended to that field via pendingField.
 		if val == "" {
 			switch key {
-			case "methods", "hosts", "paths", "path_prefixes", "cidrs":
+			case "methods", "hosts", "paths", "path_prefixes", "cidrs",
+				"headers", "header_prefixes", "user_agents", "queries":
 				pendingField = key
+				pendingTarget = target
 				continue
 			default:
 				return Config{}, fmt.Errorf("policy: unsupported rule key %q", key)
 			}
 		}
-		pendingField = ""
-		if err := applyRuleField(current, key+": "+val); err != nil {
+		pendingField, pendingTarget = "", nil
+		if err := applyRuleField(target, key+": "+val); err != nil {
 			return Config{}, err
 		}
 	}
@@ -183,10 +209,37 @@ func appendField(r *Rule, key, val string) error {
 		r.PathPrefixes = append(r.PathPrefixes, val)
 	case "cidrs":
 		r.CIDRs = append(r.CIDRs, val)
+	case "headers":
+		r.Headers = append(r.Headers, val)
+	case "header_prefixes":
+		r.HeaderPrefixes = append(r.HeaderPrefixes, val)
+	case "user_agents":
+		r.UserAgents = append(r.UserAgents, val)
+	case "queries":
+		r.Queries = append(r.Queries, val)
 	default:
 		return fmt.Errorf("policy: unsupported rule key %q", key)
 	}
 	return nil
+}
+
+// ruleKeys are the field names a rule accepts. A list item that starts with one
+// of them begins a new rule; anything else is an item of the pending list.
+var ruleKeys = map[string]bool{
+	"name": true, "action": true, "methods": true, "hosts": true,
+	"paths": true, "path_prefixes": true, "cidrs": true,
+	"headers": true, "header_prefixes": true, "user_agents": true,
+	"queries": true,
+}
+
+// isRuleKey reports whether item looks like "knownfield: ..." and therefore
+// starts a new rule rather than continuing the pending list.
+func isRuleKey(item string) bool {
+	key, _, ok := strings.Cut(item, ":")
+	if !ok {
+		return false
+	}
+	return ruleKeys[strings.TrimSpace(key)]
 }
 
 // stripComment removes a trailing " # ..." comment. A '#' inside quotes, or

@@ -46,7 +46,8 @@ Linux (`AF_PACKET`), macOS (system `tcpdump`), and Windows (npcap `Packet.dll`) 
 | `middleware` | Embed the tap inside an existing Go HTTP handler. |
 | `gateway` | Own the listener (`local`) or attach to an ingress elsewhere (`external:<url>`). |
 | `passive` | Observe interface traffic without being in the forwarding path. |
-| `sidecar` | HTTP decision API (`/v1/decide`, `/v1/check`, `/v1/observe`) for proxy plugins. |
+| `sidecar` | HTTP decision API (`/v1/decide`, `/v1/check`, `/v1/observe`, `/-/reload`) for proxy plugins. |
+| `eval` | Score the built-in detector against a labelled corpus and gate on recall/false positives. |
 
 ## Pointing at your codebase
 
@@ -200,7 +201,44 @@ policy:
         - /healthz
 ```
 
-Rules match on `methods`, `hosts`, `paths` (glob), `path_prefixes`, and `cidrs`. `block` verdicts are enforced via `-block-mode log` (dry-run, default), `iptables`, or `nft`. Auto-block a source after repeated bad verdicts with `-block-threshold N -block-window 1m -block-min-severity high`.
+Rules match on `methods`, `hosts`, `paths` (glob), `path_prefixes`, `cidrs`, `headers` (`Name=glob`), `header_prefixes` (`Name=prefix`), `user_agents` (glob), and `queries` (glob). Every dimension is ANDed with the others; values inside one dimension are ORed. A nested `not:` block negates its complete matcher. Query globs are matched against both the raw and the decoded query (`+` treated as a space), so `*union select*` behaves as expected:
+
+```yaml
+rules:
+  - name: block-sqlmap
+    action: block
+    user_agents:
+      - "*sqlmap*"
+      - "Nikto*"
+  - name: require-https
+    action: deny
+    headers:
+      - x-forwarded-proto=http
+  - name: injection-query
+    action: block
+    queries:
+      - "*union select*"
+      - "*jndi:*"
+  - name: deny-admin-outside-office
+    action: deny
+    paths:
+      - /admin/*
+    not:
+      cidrs:
+        - 10.0.0.0/8
+```
+
+The first matching rule wins, so put an allow rule above a broader deny rule to carve out an exception. `block` verdicts are enforced via `-block-mode log` (dry-run, default), `iptables`, or `nft`. Auto-block a source after repeated bad verdicts with `-block-threshold N -block-window 1m -block-min-severity high`.
+
+### Reloading policy
+
+A file-based policy reloads in place; no restart, no dropped connections, no gap in enforcement:
+
+- **On change** — a 2s stat loop notices an edited file (`-policy-watch=false` disables it).
+- **On `SIGHUP`** — forces an immediate reload.
+- **On `POST /-/reload`** — the sidecar's endpoint, for deployments where the file lives in another container.
+
+A reload swaps the compiled rule set atomically. If the new file is invalid, the error is reported and the **previous rules stay in force**, so a typo can never widen access. A successful reload also invalidates every cached decision.
 
 ## Actions
 
@@ -314,10 +352,31 @@ Run Vigilante as a plugin in the proxy you already operate, in [`pkg/`](pkg):
 # Decision API used by the Traefik and nginx plugins:
 vigilante -mode sidecar -sidecar-listen 127.0.0.1:9090 \
   -target http://127.0.0.1:3000 -policy /etc/vigilante/policy.yaml
+
+# Proxies on another host: non-loopback binds need both a token and an opt-in.
+vigilante -mode sidecar -sidecar-listen 0.0.0.0:9090 \
+  -sidecar-allow-remote -target http://app:3000 -policy /etc/vigilante/policy.yaml
+# Token from -sidecar-token or VIGILANTE_SIDECAR_TOKEN; clients send
+# "Authorization: Bearer <token>" (or X-Vigilante-Token). /healthz and /ready
+# stay unauthenticated for probes.
 ```
+
+The sidecar memoizes decisions for repeat requests that share method, host, path, query, and client address (`-sidecar-cache-ttl`, default `1s`; `0` disables). Only verdicts from a policy that inspects no request headers are cached, a reload clears the cache, and cache hits still mirror the flow to triage. Plugin defaults are deliberately tight — a 50ms decision timeout and fail-open on an unreachable sidecar — so the proxy never stalls production traffic; bad credentials fail closed instead.
 
 All three share the same policy engine, so rules behave identically. See
 [`pkg/README.md`](pkg/README.md) for per-proxy setup.
+
+## Measuring detection quality
+
+Detection quality is measured, not asserted. `-mode eval` runs the built-in detector over a labelled corpus and reports recall, precision, false-positive rate, and a per-category breakdown:
+
+```sh
+vigilante -mode eval
+vigilante -mode eval -eval-corpus deploy/eval/corpus.jsonl -eval-json
+vigilante -mode eval -eval-min-recall 0.85 -eval-max-fpr 0.05   # CI gate
+```
+
+The shipped corpus ([`deploy/eval/corpus.jsonl`](deploy/eval/corpus.jsonl)) contains 60 labelled cases — 31 attacks across traversal, SQLi, XSS, log4shell, SSRF, scanners, and sensitive-file probes, plus 29 benign requests. Three attacks are documented known misses (a time-based probe without parentheses, an open redirect, and a bare command separator), because those need context a reverse proxy does not have; they are recorded rather than quietly dropped. Add a case when you add a signature, and keep the corpus honest: a detector that only catches what it was tuned for is not measured at all.
 
 ## Embed in your Go service
 ```go
@@ -332,4 +391,5 @@ http.ListenAndServe(":8080", tap.NewMirror(appHandler, queue, ":8080", "app:3000
 
 ```sh
 go test -race -v ./...
+./scripts/ci-eval.sh        # detector regression gate (same thresholds as CI)
 ```

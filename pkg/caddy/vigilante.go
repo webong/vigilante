@@ -57,13 +57,18 @@ type Middleware struct {
 	Mirror string `json:"mirror,omitempty"`
 	// FailOpen forwards the request when the sidecar is unreachable. Default true.
 	FailOpen *bool `json:"fail_open,omitempty"`
-	// Timeout bounds one sidecar decision. Default 2s.
+	// Timeout bounds one sidecar decision. Default 50ms: a blocking middleware
+	// must fail open in a blink, not stall the request for seconds.
 	Timeout caddy.Duration `json:"timeout,omitempty"`
+	// Token is sent as "Authorization: Bearer <token>" when the sidecar
+	// requires authentication.
+	Token string `json:"token,omitempty"`
 
-	logger   *zap.Logger
-	decider  *ingress.Decider
-	client   *http.Client
-	failOpen bool
+	logger      *zap.Logger
+	decider     *ingress.Decider
+	client      *http.Client
+	failOpen    bool
+	policyWatch context.CancelFunc
 }
 
 // CaddyModule returns the Caddy module information.
@@ -84,11 +89,13 @@ func (m *Middleware) Provision(ctx caddy.Context) error {
 
 	timeout := time.Duration(m.Timeout)
 	if timeout <= 0 {
-		timeout = 2 * time.Second
+		timeout = 50 * time.Millisecond
+	}
+	if m.Endpoint != "" || m.Mirror != "" {
+		m.client = &http.Client{Timeout: timeout}
 	}
 
 	if m.Endpoint != "" {
-		m.client = &http.Client{Timeout: timeout}
 		return nil
 	}
 
@@ -98,9 +105,31 @@ func (m *Middleware) Provision(ctx caddy.Context) error {
 		if err != nil {
 			return fmt.Errorf("vigilante: load policy %q: %w", m.Policy, err)
 		}
+		// Reload the file when it changes so a rule edit needs no Caddy reload
+		// (which would briefly drop connections at the listener).
+		engine.SetReloadHook(func(err error) {
+			if err != nil {
+				m.logger.Error("vigilante policy reload failed; keeping previous rules",
+					zap.String("policy", m.Policy), zap.Error(err))
+				return
+			}
+			m.logger.Info("vigilante policy reloaded", zap.String("policy", m.Policy))
+		})
+		watchCtx, cancel := context.WithCancel(ctx.Context)
+		engine.Watch(watchCtx, 2*time.Second)
+		m.policyWatch = cancel
 		cfg.Policy = engine
 	}
 	m.decider = ingress.New(cfg)
+	return nil
+}
+
+// Cleanup stops the policy file watcher when Caddy unloads the module.
+func (m *Middleware) Cleanup() error {
+	if m.policyWatch != nil {
+		m.policyWatch()
+		m.policyWatch = nil
+	}
 	return nil
 }
 
@@ -151,6 +180,9 @@ func (m *Middleware) decide(ctx context.Context, meta ingress.RequestMeta) ingre
 		return m.fallback(err)
 	}
 	req.Header.Set("Content-Type", "application/json")
+	if m.Token != "" {
+		req.Header.Set("Authorization", "Bearer "+m.Token)
+	}
 
 	resp, err := m.client.Do(req)
 	if err != nil {
@@ -158,6 +190,9 @@ func (m *Middleware) decide(ctx context.Context, meta ingress.RequestMeta) ingre
 	}
 	defer resp.Body.Close()
 
+	if resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden {
+		return ingress.Decision{Action: ingress.Deny, Reason: "sidecar rejected credentials"}
+	}
 	if resp.StatusCode != http.StatusOK {
 		return m.fallback(fmt.Errorf("sidecar returned %s", resp.Status))
 	}
@@ -178,6 +213,9 @@ func (m *Middleware) fallback(err error) ingress.Decision {
 
 // mirror posts the observation asynchronously so the hot path never waits.
 func (m *Middleware) mirror(meta ingress.RequestMeta) {
+	if m.client == nil {
+		return
+	}
 	body, err := json.Marshal(meta)
 	if err != nil {
 		return
@@ -238,6 +276,11 @@ func (m *Middleware) UnmarshalCaddyfile(d *caddyfile.Dispenser) error {
 					return d.Errf("invalid timeout %q: %v", d.Val(), err)
 				}
 				m.Timeout = caddy.Duration(dur)
+			case "token":
+				if !d.NextArg() {
+					return d.ArgErr()
+				}
+				m.Token = d.Val()
 			default:
 				return d.Errf("unrecognized vigilante option %q", d.Val())
 			}
@@ -257,4 +300,5 @@ func parseCaddyfile(h httpcaddyfile.Helper) (caddyhttp.MiddlewareHandler, error)
 var _ caddyhttp.MiddlewareHandler = (*Middleware)(nil)
 var _ caddy.Provisioner = (*Middleware)(nil)
 var _ caddy.Validator = (*Middleware)(nil)
+var _ caddy.CleanerUpper = (*Middleware)(nil)
 var _ caddyfile.Unmarshaler = (*Middleware)(nil)

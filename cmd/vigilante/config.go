@@ -54,7 +54,16 @@ type Config struct {
 	Listen string `yaml:"listen" json:"listen"`
 	// SidecarListen is the listen address for -mode sidecar (ingress decision API).
 	SidecarListen string `yaml:"sidecar_listen" json:"sidecar_listen"`
-	Target        string `yaml:"target" json:"target"`
+	// SidecarToken requires bearer auth on the sidecar's decision endpoints.
+	// Required when SidecarListen is not loopback.
+	SidecarToken string `yaml:"sidecar_token" json:"sidecar_token"`
+	// SidecarAllowRemote permits a non-loopback sidecar bind. Off by default
+	// so a misconfigured address cannot expose policy decisions to the network.
+	SidecarAllowRemote *bool `yaml:"sidecar_allow_remote" json:"sidecar_allow_remote"`
+	// SidecarCacheTTL memoizes decisions for repeat coarse-key requests.
+	SidecarCacheTTL    time.Duration `yaml:"sidecar_cache_ttl" json:"sidecar_cache_ttl"`
+	SidecarCacheTTLSet bool          `yaml:"-" json:"-"`
+	Target             string        `yaml:"target" json:"target"`
 
 	Repo       string `yaml:"repo" json:"repo"`
 	RepoRef    string `yaml:"repo_ref" json:"repo_ref"`
@@ -72,6 +81,19 @@ type Config struct {
 	// PolicyEngine and leaves Policy empty.
 	Policy       string         `yaml:"policy" json:"policy"`
 	PolicyEngine *policy.Engine `yaml:"-" json:"-"`
+	// PolicyWatch reloads a file-based policy when it changes on disk, and on
+	// SIGHUP. Default true.
+	PolicyWatch *bool `yaml:"policy_watch" json:"policy_watch"`
+
+	// EvalCorpus is the labelled corpus used by -mode eval.
+	EvalCorpus string `yaml:"eval_corpus" json:"eval_corpus"`
+	// EvalJSON emits the eval report as one JSON object instead of a table.
+	EvalJSON *bool `yaml:"eval_json" json:"eval_json"`
+	// EvalMinRecall / EvalMaxFPR gate -mode eval. Zero/one disable the gate.
+	EvalMinRecall    float64 `yaml:"eval_min_recall" json:"eval_min_recall"`
+	EvalMinRecallSet bool    `yaml:"-" json:"-"`
+	EvalMaxFPR       float64 `yaml:"eval_max_fpr" json:"eval_max_fpr"`
+	EvalMaxFPRSet    bool    `yaml:"-" json:"-"`
 
 	BlockMode        string        `yaml:"block_mode" json:"block_mode"`
 	BlockChain       string        `yaml:"block_chain" json:"block_chain"`
@@ -156,6 +178,9 @@ func decodeJSON(data []byte) (Config, error) {
 	if err := dec.Decode(&c); err != nil {
 		return Config{}, fmt.Errorf("config: invalid JSON: %w", err)
 	}
+	_, c.SidecarCacheTTLSet = raw["sidecar_cache_ttl"]
+	_, c.EvalMinRecallSet = raw["eval_min_recall"]
+	_, c.EvalMaxFPRSet = raw["eval_max_fpr"]
 
 	if len(policyRaw) > 0 {
 		if err := c.setPolicyJSON(policyRaw); err != nil {
@@ -402,6 +427,14 @@ func decodeYAML(data []byte) (Config, error) {
 		}
 		if err := setField(rv.Field(idx), rt.Field(idx), val); err != nil {
 			return Config{}, fmt.Errorf("config: %s: %w", key, err)
+		}
+		switch key {
+		case "sidecar_cache_ttl":
+			c.SidecarCacheTTLSet = true
+		case "eval_min_recall":
+			c.EvalMinRecallSet = true
+		case "eval_max_fpr":
+			c.EvalMaxFPRSet = true
 		}
 	}
 	return c, nil

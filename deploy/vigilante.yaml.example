@@ -5,7 +5,7 @@
 # This replaces a long command line: everything you'd pass on the CLI can be
 # set here instead.
 
-# demo | http | tcp | middleware | gateway | passive | agent-worker
+# demo | http | tcp | middleware | gateway | passive | sidecar | eval | agent-worker
 mode: http
 
 # Agent backend: builtin | cli | cli:<executable> | remote:<https-url> | supervised
@@ -24,6 +24,13 @@ gateway: local
 listen: ":8080"
 target: "http://127.0.0.1:3000"
 
+# Ingress decision sidecar (mode: sidecar) used by the Traefik/nginx plugins.
+# A non-loopback listen needs both sidecar_allow_remote: true and a token.
+# sidecar_listen: 127.0.0.1:9090
+# sidecar_token: changeme          # prefer VIGILANTE_SIDECAR_TOKEN
+# sidecar_allow_remote: false
+# sidecar_cache_ttl: 1s            # 0 disables; header-based rules are never cached
+
 # Codebase index: any host URL, owner/repo shorthand, local path, or "auto"
 repo: auto
 # repo_ref: main
@@ -40,6 +47,9 @@ repo: auto
 
 # Policy rules — inline in this file. Alternatively point at a separate file
 # with `policy: /etc/vigilante/policy.yaml`.
+# A file-based policy reloads on change, on SIGHUP, and via POST /-/reload on
+# the sidecar; an invalid file keeps the previous rules in force.
+# policy_watch: true
 policy:
   deny_cidrs:
     - 192.0.2.0/24
@@ -56,6 +66,33 @@ policy:
       action: allow
       paths:
         - /healthz
+    # Rules may also match headers, user agents, and queries. Every dimension
+    # is ANDed; values within one dimension are ORed.
+    # - name: block-sqlmap
+    #   action: block
+    #   user_agents:
+    #     - "*sqlmap*"
+    #     - "Nikto*"
+    # - name: require-https
+    #   action: deny
+    #   headers:
+    #     - x-forwarded-proto=http
+    # - name: block-live-keys
+    #   action: deny
+    #   header_prefixes:
+    #     - x-api-key=sk_live_
+    # - name: injection-query
+    #   action: block
+    #   queries:
+    #     - "*union select*"
+    #     - "*jndi:*"
+    # - name: deny-admin-outside-office
+    #   action: deny
+    #   paths:
+    #     - /admin/*
+    #   not:
+    #     cidrs:
+    #       - 10.0.0.0/8
 
 # Enforcement backend for block verdicts.
 block_mode: log            # log (dry-run) | iptables | nft
@@ -105,3 +142,10 @@ obs: true                   # dashboard + JSON API at /obs/*
 # Passive sensor (mode: passive)
 # passive_iface: eth0
 # passive_ports: 80,443,8080
+
+# Detector eval (mode: eval): score the built-in detector against a corpus.
+# Fails when recall is below min_recall or false positives exceed max_fpr.
+# eval_corpus: deploy/eval/corpus.jsonl
+# eval_json: false
+# eval_min_recall: 0.85
+# eval_max_fpr: 0.05

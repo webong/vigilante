@@ -54,6 +54,10 @@ type Decision struct {
 	Action Action `json:"action"`
 	Rule   string `json:"rule,omitempty"`
 	Reason string `json:"reason,omitempty"`
+	// Cacheable reports that the decision depends only on method, host, path,
+	// query, and client address — never on a header. An adapter may then reuse
+	// it for other requests with the same coarse key until its own TTL expires.
+	Cacheable bool `json:"cacheable,omitempty"`
 }
 
 // Allowed reports whether the request may be forwarded.
@@ -70,19 +74,31 @@ type Config struct {
 	// addresses) so the correlator can attribute the flow.
 	ListenAddr string
 	TargetAddr string
+	// CacheTTL memoizes decisions for repeat requests with the same method,
+	// host, path, query, and client address. Zero disables the cache. A
+	// header-sensitive policy is never cached.
+	CacheTTL time.Duration
+	// CacheSize bounds cached decisions (default 4096).
+	CacheSize int
 }
 
 // Decider evaluates requests against policy and feeds the mirror pipeline.
 // It is safe for concurrent use.
 type Decider struct {
 	cfg      Config
+	cache    *decisionCache
 	observed atomic.Uint64
 	denied   atomic.Uint64
 	blocked  atomic.Uint64
 }
 
 // New builds a Decider.
-func New(cfg Config) *Decider { return &Decider{cfg: cfg} }
+func New(cfg Config) *Decider {
+	return &Decider{
+		cfg:   cfg,
+		cache: newDecisionCache(cfg.CacheTTL, cfg.CacheSize),
+	}
+}
 
 // Policy returns the configured engine (may be nil).
 func (d *Decider) Policy() *policy.Engine { return d.cfg.Policy }
@@ -92,27 +108,73 @@ func (d *Decider) Queue() *tap.MirrorQueue { return d.cfg.Queue }
 
 // Decide evaluates meta and, for block/allow, mirrors the observation. Denied
 // requests are not mirrored (they never reach the application).
+//
+// When the configured policy is cacheable and Config.CacheTTL is set, a repeat
+// request with the same coarse key reuses the verdict but still mirrors the
+// observation, so triage never sees a gap.
 func (d *Decider) Decide(meta RequestMeta) Decision {
 	d.observed.Add(1)
 
 	if d.cfg.Policy == nil {
 		d.Observe(meta)
-		return Decision{Action: Allow}
+		return Decision{Action: Allow, Cacheable: true}
 	}
 
-	v := d.cfg.Policy.Evaluate(meta.Request())
+	epoch := d.cfg.Policy.Epoch()
+	cacheable := d.cache != nil && d.cfg.Policy.DecisionCacheable()
+	var key string
+	if cacheable {
+		// A reload invalidates the cache wholesale: the salt changes and every
+		// old entry is dropped rather than lingering for its TTL.
+		d.cache.syncEpoch(epoch)
+		key = cacheKey(meta)
+		if cached, ok := d.cache.get(key); ok {
+			// A reload can land between reading the epoch and the cache lookup.
+			// Reuse the entry only while the policy still names the same snapshot.
+			if d.cfg.Policy.Epoch() == epoch {
+				d.note(cached.Action)
+				if cached.Action != Deny {
+					d.Observe(meta)
+				}
+				return cached
+			}
+		}
+	}
+
+	v, evalEpoch, evalCacheable := d.cfg.Policy.EvaluateSnapshot(meta.Request())
+	var dec Decision
 	switch v.Action {
 	case policy.ActionDeny:
-		d.denied.Add(1)
-		return Decision{Action: Deny, Rule: v.Rule, Reason: "denied by policy"}
+		dec = Decision{Action: Deny, Rule: v.Rule, Reason: "denied by policy"}
 	case policy.ActionBlock:
 		// Mirror first so triage sees the offending request, then reject.
 		d.Observe(meta)
-		d.blocked.Add(1)
-		return Decision{Action: Block, Rule: v.Rule, Reason: "blocked by policy"}
+		dec = Decision{Action: Block, Rule: v.Rule, Reason: "blocked by policy"}
 	default:
 		d.Observe(meta)
-		return Decision{Action: Allow, Rule: v.Rule}
+		dec = Decision{Action: Allow, Rule: v.Rule}
+	}
+	dec.Cacheable = evalCacheable
+	if d.cache != nil && evalCacheable {
+		if key == "" {
+			key = cacheKey(meta)
+		}
+		d.cache.syncEpoch(evalEpoch)
+		// Do not let a verdict from the previous snapshot enter the new epoch.
+		if d.cfg.Policy.Epoch() == evalEpoch {
+			d.cache.put(key, dec)
+		}
+	}
+	d.note(dec.Action)
+	return dec
+}
+
+func (d *Decider) note(action Action) {
+	switch action {
+	case Deny:
+		d.denied.Add(1)
+	case Block:
+		d.blocked.Add(1)
 	}
 }
 
@@ -146,6 +208,7 @@ type Stats struct {
 	Observed uint64 `json:"observed"`
 	Denied   uint64 `json:"denied"`
 	Blocked  uint64 `json:"blocked"`
+	Cached   int    `json:"cached"`
 }
 
 // Stats returns a snapshot of decision counters.
@@ -154,6 +217,7 @@ func (d *Decider) Stats() Stats {
 		Observed: d.observed.Load(),
 		Denied:   d.denied.Load(),
 		Blocked:  d.blocked.Load(),
+		Cached:   d.cache.len(),
 	}
 }
 

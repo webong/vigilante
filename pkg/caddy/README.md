@@ -28,7 +28,8 @@ xcaddy build --with github.com/webong/vigilante/pkg/caddy=./pkg/caddy
         policy /etc/vigilante/policy.yaml
         mirror http://127.0.0.1:9090
         fail_open true
-        timeout 2s
+        timeout 50ms
+        # token change-me        # when the sidecar requires auth
     }
     reverse_proxy 127.0.0.1:3000
 }
@@ -36,11 +37,12 @@ xcaddy build --with github.com/webong/vigilante/pkg/caddy=./pkg/caddy
 
 | Option | Meaning |
 | --- | --- |
-| `policy <path>` | Vigilante policy file (YAML or JSON). Evaluated in-process. |
+| `policy <path>` | Vigilante policy file (YAML or JSON). Evaluated in-process and reloaded on change. |
 | `endpoint <url>` | Delegate decisions to a sidecar instead of loading `policy` locally. |
 | `mirror <url>` | Base URL of a sidecar; every request is posted to `/v1/observe`. |
 | `fail_open <bool>` | Forward when a node/sidecar is unavailable. Default `true`. |
-| `timeout <dur>` | Bound on a sidecar decision. Default `2s`. |
+| `timeout <dur>` | Bound on a sidecar decision. Default `50ms`. |
+| `token <token>` | Sent as `Authorization: Bearer <token>`. |
 
 ## JSON config
 
@@ -50,9 +52,13 @@ xcaddy build --with github.com/webong/vigilante/pkg/caddy=./pkg/caddy
   "policy": "/etc/vigilante/policy.yaml",
   "mirror": "http://127.0.0.1:9090",
   "fail_open": true,
-  "timeout": "2s"
+  "timeout": "50ms"
 }
 ```
+
+A file-based `policy` is watched and reloaded in place (2s), so a rule edit needs
+no Caddy reload and drops no connections. An invalid file keeps the previous
+rules. When Caddy unloads the module the watcher is stopped.
 
 ## Two ways to run
 

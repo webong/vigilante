@@ -62,11 +62,14 @@ func run(args []string, out io.Writer) error {
 	fs := flag.NewFlagSet("vigilante", flag.ContinueOnError)
 	fs.SetOutput(out)
 
-	mode := fs.String("mode", "demo", "Execution mode: demo, http, tcp, middleware, gateway, passive, sidecar, or agent-worker")
+	mode := fs.String("mode", "demo", "Execution mode: demo, http, tcp, middleware, gateway, passive, sidecar, eval, or agent-worker")
 	passiveIface := fs.String("passive-iface", "", "Interface to passively sniff in -mode passive (e.g. eth0; requires root/CAP_NET_RAW)")
 	passivePorts := fs.String("passive-ports", "", "Comma-separated ports to capture in -mode passive (empty = all)")
 	listenAddr := fs.String("listen", "127.0.0.1:8080", "Address for vigilante middleware to listen on")
 	sidecarListen := fs.String("sidecar-listen", "127.0.0.1:9090", "Listen address for -mode sidecar (ingress decision API: /v1/decide, /v1/check, /v1/observe)")
+	sidecarToken := fs.String("sidecar-token", "", "Bearer token required by -mode sidecar (prefer VIGILANTE_SIDECAR_TOKEN; required for a non-loopback bind)")
+	sidecarAllowRemote := fs.Bool("sidecar-allow-remote", false, "Allow -sidecar-listen to bind a non-loopback address (requires -sidecar-token)")
+	sidecarCacheTTL := fs.Duration("sidecar-cache-ttl", time.Second, "Memoize cacheable decisions for repeat requests sharing method/host/path/query/client address (0 disables)")
 	targetAddr := fs.String("target", "http://127.0.0.1:9000", "Upstream server URL (for http/gateway/sidecar) or host:port (for tcp)")
 	tlsCert := fs.String("tls-cert", "", "TLS certificate file for HTTPS on -listen (http/gateway modes)")
 	tlsKey := fs.String("tls-key", "", "TLS private key file for HTTPS on -listen (http/gateway modes)")
@@ -74,6 +77,11 @@ func run(args []string, out io.Writer) error {
 	plannerToken := fs.String("planner-token", "", "Internal token for the upstream route planner (gateway mode)")
 	gatewayPosture := fs.String("gateway", "local", "Gateway posture: local (Vigilante's own ingress, default) or external:<url> (attach to an ingress running elsewhere — recommended if you already run one)")
 	policyFile := fs.String("policy", "", "Path to a policy file (YAML/JSON) with allow/deny/block rules")
+	policyWatch := fs.Bool("policy-watch", true, "Reload a file-based policy when it changes on disk, and on SIGHUP (no restart, no dropped connections)")
+	evalCorpus := fs.String("eval-corpus", "", "Labelled JSONL corpus for -mode eval (one case per line)")
+	evalJSON := fs.Bool("eval-json", false, "Emit the -mode eval report as a single JSON object")
+	evalMinRecall := fs.Float64("eval-min-recall", 0, "Fail -mode eval when recall is below this value (0 = no gate)")
+	evalMaxFPR := fs.Float64("eval-max-fpr", 1, "Fail -mode eval when the false-positive rate exceeds this value (1 = no gate)")
 	obsEnabled := fs.Bool("obs", true, "Enable the obs ext plugin (dashboard at /obs/dashboard + JSON API), when an alert store is present")
 	blockMode := fs.String("block-mode", "log", "Block enforcement mode: log (dry-run), iptables, or nft")
 	blockChain := fs.String("block-chain", "VIGILANTE", "iptables/nft chain name for block enforcement")
@@ -148,7 +156,11 @@ func run(args []string, out io.Writer) error {
 			*dst = val
 		}
 	}
-
+	applyBool := func(flagSet bool, dst *bool, val *bool) {
+		if !flagSet && val != nil {
+			*dst = *val
+		}
+	}
 	applyStr(set["mode"], mode, cfg.Mode)
 	applyStr(set["agent"], agentKind, cfg.Agent)
 	applyStr(set["agent-command"], agentCommand, cfg.AgentCommand)
@@ -160,6 +172,11 @@ func run(args []string, out io.Writer) error {
 	applyStr(set["gateway"], gatewayPosture, cfg.Gateway)
 	applyStr(set["listen"], listenAddr, cfg.Listen)
 	applyStr(set["sidecar-listen"], sidecarListen, cfg.SidecarListen)
+	applyStr(set["sidecar-token"], sidecarToken, cfg.SidecarToken)
+	applyBool(set["sidecar-allow-remote"], sidecarAllowRemote, cfg.SidecarAllowRemote)
+	if !set["sidecar-cache-ttl"] && cfg.SidecarCacheTTLSet {
+		*sidecarCacheTTL = cfg.SidecarCacheTTL
+	}
 	applyStr(set["target"], targetAddr, cfg.Target)
 	applyStr(set["repo"], repoTarget, cfg.Repo)
 	applyStr(set["repo-ref"], repoRef, cfg.RepoRef)
@@ -171,6 +188,15 @@ func run(args []string, out io.Writer) error {
 	applyStr(set["planner-url"], plannerURL, cfg.PlannerURL)
 	applyStr(set["planner-token"], plannerToken, cfg.PlannerToken)
 	applyStr(set["policy"], policyFile, cfg.Policy)
+	applyBool(set["policy-watch"], policyWatch, cfg.PolicyWatch)
+	applyStr(set["eval-corpus"], evalCorpus, cfg.EvalCorpus)
+	applyBool(set["eval-json"], evalJSON, cfg.EvalJSON)
+	if !set["eval-min-recall"] && cfg.EvalMinRecallSet {
+		*evalMinRecall = cfg.EvalMinRecall
+	}
+	if !set["eval-max-fpr"] && cfg.EvalMaxFPRSet {
+		*evalMaxFPR = cfg.EvalMaxFPR
+	}
 	applyStr(set["block-mode"], blockMode, cfg.BlockMode)
 	applyStr(set["block-chain"], blockChain, cfg.BlockChain)
 	applyStr(set["block-min-severity"], blockMinSev, cfg.BlockMinSeverity)
@@ -212,6 +238,10 @@ func run(args []string, out io.Writer) error {
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
+
+	if *mode == "eval" {
+		return runEval(ctx, out, *evalCorpus, *evalJSON, *evalMinRecall, *evalMaxFPR)
+	}
 
 	if *mode == "agent-worker" {
 		if *agentIPC == "" {
@@ -293,15 +323,44 @@ func run(args []string, out io.Writer) error {
 			return err
 		}
 		polEngine = engine
-		fmt.Fprintf(out, "[vigilante] policy loaded from %s\n", *policyFile)
+		fmt.Fprintf(out, "[vigilante] policy loaded from %s (%d rules)\n", *policyFile, engine.RuleCount())
 	case cfg.PolicyEngine != nil:
 		polEngine = cfg.PolicyEngine
-		fmt.Fprintln(out, "[vigilante] policy loaded inline from config")
+		fmt.Fprintf(out, "[vigilante] policy loaded inline from config (%d rules)\n", polEngine.RuleCount())
 	}
 	if polEngine != nil {
 		polGate = func(r *http.Request) string {
 			return string(polEngine.Evaluate(r).Action)
 		}
+	}
+	// File-based policies reload without a restart: a 2s stat loop catches an
+	// edited file, and SIGHUP forces an immediate reload. A failed reload keeps
+	// the previous rules in force, so a typo can never widen access.
+	if polEngine != nil && *policyFile != "" {
+		polEngine.SetReloadHook(func(err error) {
+			if err != nil {
+				fmt.Fprintf(out, "[vigilante] policy reload FAILED, keeping previous rules: %v\n", err)
+				return
+			}
+			fmt.Fprintf(out, "[vigilante] policy reloaded from %s (%d rules, cache invalidated)\n", *policyFile, polEngine.RuleCount())
+		})
+		if *policyWatch {
+			polEngine.Watch(ctx, 2*time.Second)
+			fmt.Fprintln(out, "[vigilante] policy watch active (2s; SIGHUP reloads immediately)")
+		}
+		sighup := make(chan os.Signal, 1)
+		signal.Notify(sighup, syscall.SIGHUP)
+		go func() {
+			for {
+				select {
+				case <-ctx.Done():
+					signal.Stop(sighup)
+					return
+				case <-sighup:
+					_ = polEngine.Reload()
+				}
+			}
+		}()
 	}
 	// Static policy first, then the live snapshot. The snapshot can only make
 	// the outcome stricter, never loosen a configured rule.
@@ -628,7 +687,16 @@ func run(args []string, out io.Writer) error {
 	case "middleware":
 		return runMiddlewareMode(ctx, out, corr, *listenAddr, *targetAddr, *queueSize, *tlsCert, *tlsKey, polGate, alertStore, *sampleRate, obsBridge, obsMetrics)
 	case "sidecar":
-		return runSidecar(ctx, out, corr, polEngine, *sidecarListen, *targetAddr, *queueSize, *sampleRate)
+		return runSidecar(ctx, out, corr, sidecarOptions{
+			Engine:      polEngine,
+			Listen:      *sidecarListen,
+			Target:      *targetAddr,
+			QueueSize:   *queueSize,
+			SampleRate:  *sampleRate,
+			Token:       firstNonEmpty(*sidecarToken, os.Getenv("VIGILANTE_SIDECAR_TOKEN")),
+			AllowRemote: *sidecarAllowRemote,
+			CacheTTL:    *sidecarCacheTTL,
+		})
 	case "gateway":
 		gwPosture, gwExternal := splitGatewayArg(*gatewayPosture)
 		if gwExternal != "" && *targetAddr == "" {
@@ -639,8 +707,20 @@ func run(args []string, out io.Writer) error {
 	case "passive":
 		return runPassiveMode(ctx, out, corr, *passiveIface, *passivePorts, *queueSize, *sampleRate, alertStore, obsBridge, obsMetrics)
 	default:
-		return fmt.Errorf("unsupported mode %q (choose demo, http, tcp, middleware, gateway, passive, or agent-worker)", *mode)
+		return fmt.Errorf("unsupported mode %q (choose demo, http, tcp, middleware, gateway, passive, sidecar, eval, or agent-worker)", *mode)
 	}
+}
+
+// sidecarOptions configures the ingress decision sidecar.
+type sidecarOptions struct {
+	Engine      *policy.Engine
+	Listen      string
+	Target      string
+	QueueSize   int
+	SampleRate  float64
+	Token       string
+	AllowRemote bool
+	CacheTTL    time.Duration
 }
 
 // runSidecar serves the ingress decision API used by proxy plugins (Traefik's
@@ -648,28 +728,39 @@ func run(args []string, out io.Writer) error {
 // It runs the same policy engine and mirror pipeline as the standalone gateway:
 // /v1/decide returns a JSON verdict, /v1/check returns 204/403, and
 // /v1/observe only mirrors the request for agent triage.
-func runSidecar(ctx context.Context, out io.Writer, corr *correlator.Correlator, engine *policy.Engine, listenAddr, targetAddr string, queueSize int, sampleRate float64) error {
-	queue := tap.NewMirrorQueue(queueSize)
-	queue.SetSampleRate(sampleRate)
+func runSidecar(ctx context.Context, out io.Writer, corr *correlator.Correlator, opts sidecarOptions) error {
+	if !isLoopbackListen(opts.Listen) {
+		if !opts.AllowRemote {
+			return fmt.Errorf("refusing to bind the sidecar on non-loopback %s: pass -sidecar-allow-remote if the proxy runs on another host", opts.Listen)
+		}
+		if opts.Token == "" {
+			return fmt.Errorf("refusing an unauthenticated non-loopback sidecar on %s: set -sidecar-token or VIGILANTE_SIDECAR_TOKEN", opts.Listen)
+		}
+	}
+
+	queue := tap.NewMirrorQueue(opts.QueueSize)
+	queue.SetSampleRate(opts.SampleRate)
 
 	// Label observations with the upstream host:port so the correlator can map
 	// the flow back to the process that owns it.
-	labelTarget := targetAddr
-	if u, err := url.Parse(targetAddr); err == nil && u.Host != "" {
+	labelTarget := opts.Target
+	if u, err := url.Parse(opts.Target); err == nil && u.Host != "" {
 		labelTarget = u.Host
 	}
 
 	decider := ingress.New(ingress.Config{
-		Policy:     engine,
+		Policy:     opts.Engine,
 		Queue:      queue,
-		ListenAddr: listenAddr,
+		ListenAddr: opts.Listen,
 		TargetAddr: labelTarget,
+		CacheTTL:   opts.CacheTTL,
 	})
 	queue.Drain(ctx, 2, func(ctx context.Context, ev agent.PacketEvent) {
 		_, _ = corr.ProcessPacket(ctx, ev)
 	})
 
-	srv := ingress.NewServer(decider, listenAddr)
+	srv := ingress.NewServer(decider, opts.Listen)
+	srv.SetToken(opts.Token)
 	go func() {
 		<-ctx.Done()
 		shutCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -677,11 +768,34 @@ func runSidecar(ctx context.Context, out io.Writer, corr *correlator.Correlator,
 		_ = srv.Shutdown(shutCtx)
 	}()
 
-	fmt.Fprintf(out, "[vigilante] ingress sidecar on %s: /v1/decide (JSON), /v1/check (204/403), /v1/observe (mirror)\n", listenAddr)
+	auth := "off"
+	if opts.Token != "" {
+		auth = "bearer"
+	}
+	fmt.Fprintf(out, "[vigilante] ingress sidecar on %s: /v1/decide (JSON), /v1/check (204/403), /v1/observe (mirror), auth=%s, cache=%s\n",
+		opts.Listen, auth, opts.CacheTTL)
 	if err := srv.ListenAndServe(); err != nil {
 		return err
 	}
 	return nil
+}
+
+// isLoopbackListen reports whether addr binds only a loopback interface. An
+// empty host (":9090") means all interfaces and is therefore not loopback.
+func isLoopbackListen(addr string) bool {
+	host, _, err := net.SplitHostPort(addr)
+	if err != nil {
+		host = addr
+	}
+	host = strings.Trim(strings.TrimSpace(host), "[]")
+	if host == "" {
+		return false
+	}
+	if strings.EqualFold(host, "localhost") {
+		return true
+	}
+	ip := net.ParseIP(host)
+	return ip != nil && ip.IsLoopback()
 }
 
 // runMiddlewareMode embeds the Vigilante tap in-process behind an existing

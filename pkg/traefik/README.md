@@ -12,6 +12,15 @@ vigilante -mode sidecar -sidecar-listen 127.0.0.1:9090 \
   -target http://127.0.0.1:3000 -policy /etc/vigilante/policy.yaml
 ```
 
+If Traefik runs on another host, bind the sidecar to a reachable address and
+give it a token:
+
+```sh
+VIGILANTE_SIDECAR_TOKEN=... vigilante -mode sidecar \
+  -sidecar-listen 0.0.0.0:9090 -sidecar-allow-remote \
+  -target http://app:3000 -policy /etc/vigilante/policy.yaml
+```
+
 ## 2. Enable plugins in Traefik
 
 ```yaml
@@ -49,8 +58,10 @@ http:
       plugin:
         vigilante:
           endpoint: http://127.0.0.1:9090
-          timeout: 2
+          timeoutMs: 50
           failOpen: true
+          cacheTTL: 1
+          # token: change-me
   services:
     app:
       loadBalancer:
@@ -61,8 +72,21 @@ http:
 | Option | Meaning |
 | --- | --- |
 | `endpoint` | Sidecar base URL (required). |
-| `timeout` | Decision timeout in seconds. Default `2`. |
+| `timeoutMs` | Decision timeout in milliseconds. Default `50`. |
+| `timeout` | Legacy timeout in **seconds**; takes precedence when set. Leave it unset. |
 | `failOpen` | Forward when the sidecar is unreachable. Default `true`. |
+| `cacheTTL` | Reuse cacheable `allow` decisions for N seconds. Default `1`; `0` disables. |
+| `cacheSize` | Maximum cached decisions. Default `4096`. |
+| `token` | Sent as `Authorization: Bearer <token>`. |
+| `forwardHeaders` | Headers sent to the sidecar for header rules. Default `["User-Agent","Content-Type","X-Forwarded-Proto"]`. |
 
 Denied/blocked requests get `403`; the upstream is never called. Allowed
 requests are forwarded untouched.
+
+The timeout is deliberately short: this middleware sits in the request path, so
+a slow sidecar should cost milliseconds, not seconds. Only `allow` decisions
+marked cacheable are cached — a `deny` is re-asked on every request, so
+tightening a rule takes effect immediately. A `401`/`403` from the sidecar means
+the token is wrong; the plugin fails closed on it even with `failOpen: true`.
+Policy changes need no Traefik restart: call `POST /-/reload` on the sidecar (or
+let its file watcher pick the change up).

@@ -16,7 +16,6 @@ import (
 	"context"
 	"encoding/json"
 	"io"
-	"net/url"
 	"strings"
 	"time"
 
@@ -165,14 +164,17 @@ type AdvisoryCandidate struct {
 
 // Verdict is returned by the agent after analyzing the EnrichedEnvelope.
 type Verdict struct {
-	FlowID               string    `json:"flow_id"`
-	Severity             string    `json:"severity"` // "info", "low", "medium", "high", "critical"
-	Action               string    `json:"action"`   // agent recommendation; host policy decides what may run
-	Summary              string    `json:"summary"`
-	ReachableDeps        []string  `json:"reachable_deps,omitempty"`     // legacy agent-supplied claim
-	MatchedAdvisories    []string  `json:"matched_advisories,omitempty"` // legacy agent-supplied claim
-	MatchedHandler       string    `json:"matched_handler,omitempty"`    // e.g. "cmd/server/main.go:42"
-	InspectedSource      string    `json:"inspected_source,omitempty"`
+	FlowID            string   `json:"flow_id"`
+	Severity          string   `json:"severity"` // "info", "low", "medium", "high", "critical"
+	Action            string   `json:"action"`   // agent recommendation; host policy decides what may run
+	Summary           string   `json:"summary"`
+	ReachableDeps     []string `json:"reachable_deps,omitempty"`     // legacy agent-supplied claim
+	MatchedAdvisories []string `json:"matched_advisories,omitempty"` // legacy agent-supplied claim
+	MatchedHandler    string   `json:"matched_handler,omitempty"`    // e.g. "cmd/server/main.go:42"
+	InspectedSource   string   `json:"inspected_source,omitempty"`
+	// Indicator names the detection family that fired (e.g. "sqli",
+	// "scanner"), so operators and the eval harness can aggregate by rule.
+	Indicator            string    `json:"indicator,omitempty"`
 	ReverseGraphQueried  bool      `json:"reverse_graph_queried,omitempty"`
 	ReverseObservedNodes int       `json:"reverse_observed_nodes,omitempty"`
 	Recommendations      []string  `json:"recommendations,omitempty"`
@@ -541,33 +543,23 @@ func DefaultBuiltInHandler(ctx context.Context, env EnrichedEnvelope) (Verdict, 
 		verdict.MatchedHandler = mr.File + ":" + itoa(mr.Line)
 	}
 
-	lowerPath := strings.ToLower(env.Event.Path)
-	if decoded, err := url.PathUnescape(lowerPath); err == nil {
-		lowerPath = decoded
-	}
-	lowerPath = strings.ReplaceAll(lowerPath, "\\", "/")
-	lowerPayload := strings.ToLower(env.Event.PayloadPreview)
-	combined := lowerPath + " " + lowerPayload
-
-	switch {
-	case strings.Contains(combined, "../") || strings.Contains(combined, "/etc/passwd"):
-		verdict.Severity = "high"
+	// Evidence-first indicators: each match names the exact marker that fired,
+	// so a finding can always cite what was observed rather than assert a
+	// vulnerability. Installed dependencies and reachability remain separate
+	// claims an external agent must establish.
+	if ind := detectIndicator(env); ind != nil {
+		verdict.Severity = ind.severity
 		verdict.Action = "alert"
-		verdict.Summary = "Path traversal indicator in request to process " + env.ServerProcess.Name
-		verdict.Findings = []Finding{{Subject: "request path or preview", Claim: "path traversal indicator observed", Evidence: []string{"decoded path or payload contains a traversal marker"}, Confidence: "medium"}}
-		verdict.Recommendations = []string{
-			"Verify filesystem mount isolation on " + env.OS.Hostname,
-			"Audit file-serving handlers in module " + env.DependencyGraph.MainModule,
-		}
-	case strings.Contains(combined, "jndi:") || strings.Contains(combined, "union select") || strings.Contains(combined, "<script"):
-		verdict.Severity = "high"
-		verdict.Action = "alert"
-		verdict.Summary = "Injection indicator in request to PID " + itoa(env.ServerProcess.PID) + " (" + env.ServerProcess.Name + ")"
-		verdict.Findings = []Finding{{Subject: "request path or preview", Claim: "injection indicator observed", Evidence: []string{"request contains a known injection marker"}, Confidence: "medium"}}
-		verdict.Recommendations = []string{
-			"Review the matched handler and validate whether the input reached a query or parser sink",
-		}
-	case env.TriggerReason == "new-unseen-process-socket":
+		verdict.Summary = ind.summary
+		verdict.Indicator = ind.category
+		verdict.Findings = []Finding{{
+			Subject:    "request path, query, body, or user agent",
+			Claim:      ind.claim,
+			Evidence:   ind.evidence,
+			Confidence: ind.confidence,
+		}}
+		verdict.Recommendations = ind.recommendations
+	} else if env.TriggerReason == "new-unseen-process-socket" {
 		verdict.Severity = "low"
 		verdict.Action = "observe"
 		verdict.Summary = "First mirrored flow mapped to PID " + itoa(env.ServerProcess.PID) + " (" + env.ServerProcess.Name + ") with " + itoa(len(env.DependencyGraph.Dependencies)) + " dependencies"

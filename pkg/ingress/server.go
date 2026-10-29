@@ -2,11 +2,13 @@ package ingress
 
 import (
 	"context"
+	"crypto/subtle"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"net/http"
+	"strings"
 	"time"
 )
 
@@ -25,6 +27,7 @@ type Server struct {
 	decider *Decider
 	handler http.Handler
 	srv     *http.Server
+	token   string
 }
 
 // NewServer builds a sidecar around d listening on addr (e.g. ":9090").
@@ -35,6 +38,7 @@ func NewServer(d *Decider, addr string) *Server {
 	mux.HandleFunc("/v1/decide", s.handleDecide)
 	mux.HandleFunc("/v1/check", s.handleCheck)
 	mux.HandleFunc("/v1/observe", s.handleObserve)
+	mux.HandleFunc("/-/reload", s.handleReload)
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, _ *http.Request) {
 		_, _ = io.WriteString(w, "ok")
 	})
@@ -45,7 +49,7 @@ func NewServer(d *Decider, addr string) *Server {
 	s.handler = mux
 	s.srv = &http.Server{
 		Addr:              addr,
-		Handler:           mux,
+		Handler:           http.HandlerFunc(s.serve),
 		ReadHeaderTimeout: 10 * time.Second,
 		ReadTimeout:       15 * time.Second,
 		WriteTimeout:      15 * time.Second,
@@ -54,8 +58,39 @@ func NewServer(d *Decider, addr string) *Server {
 	return s
 }
 
-// Handler returns the sidecar mux for embedding in another server.
-func (s *Server) Handler() http.Handler { return s.handler }
+// SetToken requires bearer authentication on every endpoint except the
+// liveness probes. Use it whenever the sidecar listens on anything but
+// loopback. It must be called before ListenAndServe.
+func (s *Server) SetToken(token string) { s.token = strings.TrimSpace(token) }
+
+// Handler returns the authenticated sidecar handler for embedding elsewhere.
+func (s *Server) Handler() http.Handler { return http.HandlerFunc(s.serve) }
+
+// serve enforces the optional token, then dispatches. Probe endpoints stay open
+// so a container runtime can check liveness without the secret.
+func (s *Server) serve(w http.ResponseWriter, r *http.Request) {
+	if !s.authorized(r) {
+		w.Header().Set("WWW-Authenticate", `Bearer realm="vigilante"`)
+		http.Error(w, "unauthorized", http.StatusUnauthorized)
+		return
+	}
+	s.handler.ServeHTTP(w, r)
+}
+
+func (s *Server) authorized(r *http.Request) bool {
+	if s.token == "" {
+		return true
+	}
+	switch r.URL.Path {
+	case "/healthz", "/ready":
+		return true
+	}
+	got := strings.TrimSpace(strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer "))
+	if got == "" {
+		got = strings.TrimSpace(r.Header.Get("X-Vigilante-Token"))
+	}
+	return subtle.ConstantTimeCompare([]byte(got), []byte(s.token)) == 1
+}
 
 // Addr returns the configured listen address.
 func (s *Server) Addr() string { return s.srv.Addr }
@@ -109,12 +144,39 @@ func (s *Server) handleObserve(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusAccepted)
 }
 
+// handleReload recompiles the sidecar's policy from its source file. It lets a
+// proxy deployment whose config lives in another container apply a rule change
+// without restarting the sidecar. Authentication still applies.
+func (s *Server) handleReload(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	engine := s.decider.Policy()
+	if engine == nil {
+		http.Error(w, "no policy loaded", http.StatusConflict)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	if err := engine.Reload(); err != nil {
+		w.WriteHeader(http.StatusUnprocessableEntity)
+		_ = json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
+		return
+	}
+	_ = json.NewEncoder(w).Encode(map[string]any{
+		"status": "reloaded",
+		"rules":  engine.RuleCount(),
+		"at":     engine.LastReload().UTC().Format(time.RFC3339),
+	})
+}
+
 func (s *Server) handleMetrics(w http.ResponseWriter, _ *http.Request) {
 	st := s.decider.Stats()
 	w.Header().Set("Content-Type", "text/plain; version=0.0.4")
 	fmt.Fprintf(w, "vigilante_ingress_observed_total %d\n", st.Observed)
 	fmt.Fprintf(w, "vigilante_ingress_denied_total %d\n", st.Denied)
 	fmt.Fprintf(w, "vigilante_ingress_blocked_total %d\n", st.Blocked)
+	fmt.Fprintf(w, "vigilante_ingress_cached_entries %d\n", st.Cached)
 	if q := s.decider.Queue(); q != nil {
 		queued, dropped := q.Stats()
 		fmt.Fprintf(w, "vigilante_queue_enqueued_total %d\n", queued)

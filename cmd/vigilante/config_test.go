@@ -50,6 +50,37 @@ func TestLoadConfigEmptyPath(t *testing.T) {
 	}
 }
 
+func TestLoadConfigPreservesExplicitZeroValues(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		ext  string
+		body string
+	}{
+		{"json", ".json", `{"sidecar_cache_ttl":0,"eval_min_recall":0,"eval_max_fpr":0}`},
+		{"yaml", ".yaml", "sidecar_cache_ttl: 0s\neval_min_recall: 0\neval_max_fpr: 0\n"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "vig"+tc.ext)
+			if err := os.WriteFile(path, []byte(tc.body), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			cfg, err := loadConfig(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !cfg.SidecarCacheTTLSet || cfg.SidecarCacheTTL != 0 {
+				t.Fatalf("sidecar cache TTL = %v (set=%v)", cfg.SidecarCacheTTL, cfg.SidecarCacheTTLSet)
+			}
+			if !cfg.EvalMinRecallSet || cfg.EvalMinRecall != 0 {
+				t.Fatalf("eval min recall = %v (set=%v)", cfg.EvalMinRecall, cfg.EvalMinRecallSet)
+			}
+			if !cfg.EvalMaxFPRSet || cfg.EvalMaxFPR != 0 {
+				t.Fatalf("eval max FPR = %v (set=%v)", cfg.EvalMaxFPR, cfg.EvalMaxFPRSet)
+			}
+		})
+	}
+}
+
 func TestLoadConfigUnknownKey(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "vig.json")
 	if err := os.WriteFile(path, []byte(`{"bogus":1}`), 0o644); err != nil {
@@ -344,5 +375,63 @@ func TestPolicyPathYAMLStillWorks(t *testing.T) {
 	}
 	if cfg.Policy != "/etc/vig/policy.yaml" || cfg.PolicyEngine != nil {
 		t.Fatalf("cfg = %+v", cfg)
+	}
+}
+
+func TestSidecarAndEvalConfigKeys(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "vig.yaml")
+	data := "" +
+		"mode: sidecar\n" +
+		"sidecar_listen: 127.0.0.1:9091\n" +
+		"sidecar_token: s3cret\n" +
+		"sidecar_allow_remote: true\n" +
+		"sidecar_cache_ttl: 500ms\n" +
+		"policy_watch: false\n" +
+		"eval_corpus: deploy/eval/corpus.jsonl\n" +
+		"eval_min_recall: 0.9\n" +
+		"eval_max_fpr: 0.05\n"
+	if err := os.WriteFile(path, []byte(data), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := loadConfig(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.SidecarListen != "127.0.0.1:9091" || cfg.SidecarToken != "s3cret" {
+		t.Fatalf("sidecar = %q/%q", cfg.SidecarListen, cfg.SidecarToken)
+	}
+	if cfg.SidecarAllowRemote == nil || !*cfg.SidecarAllowRemote {
+		t.Fatalf("sidecar_allow_remote = %v", cfg.SidecarAllowRemote)
+	}
+	if cfg.SidecarCacheTTL != 500*time.Millisecond {
+		t.Errorf("sidecar_cache_ttl = %v", cfg.SidecarCacheTTL)
+	}
+	if cfg.PolicyWatch == nil || *cfg.PolicyWatch {
+		t.Errorf("policy_watch = %v, want false", cfg.PolicyWatch)
+	}
+	if cfg.EvalCorpus != "deploy/eval/corpus.jsonl" || cfg.EvalMinRecall != 0.9 || cfg.EvalMaxFPR != 0.05 {
+		t.Errorf("eval = %q/%v/%v", cfg.EvalCorpus, cfg.EvalMinRecall, cfg.EvalMaxFPR)
+	}
+}
+
+func TestIsLoopbackListen(t *testing.T) {
+	cases := []struct {
+		addr string
+		want bool
+	}{
+		{"127.0.0.1:9090", true},
+		{"[::1]:9090", true},
+		{"localhost:9090", true},
+		{"127.0.0.2:9090", true},
+		{":9090", false},
+		{"0.0.0.0:9090", false},
+		{"[::]:9090", false},
+		{"192.0.2.10:9090", false},
+		{"sidecar.internal:9090", false},
+	}
+	for _, tc := range cases {
+		if got := isLoopbackListen(tc.addr); got != tc.want {
+			t.Errorf("isLoopbackListen(%q) = %v, want %v", tc.addr, got, tc.want)
+		}
 	}
 }

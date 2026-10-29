@@ -51,6 +51,7 @@ http {
 
     server {
         set $vigilante_endpoint "http://127.0.0.1:9090";
+        set $vigilante_token "";   # set when the sidecar requires auth
 
         location / {
             js_access vigilante.access;
@@ -61,7 +62,7 @@ http {
 ```
 
 Requires njs ≥ 0.5 (`ngx.fetch`). The handler fails open if the sidecar is
-unreachable.
+unreachable, but fails closed on `401`/`403` (bad credentials or a policy deny).
 
 ## Notes
 
@@ -71,3 +72,11 @@ unreachable.
   affect the response.
 - nginx needs `resolver` configured if you proxy to a hostname rather than an
   upstream block.
+- If nginx runs on another host, start the sidecar with
+  `-sidecar-listen 0.0.0.0:9090 -sidecar-allow-remote` plus a
+  `VIGILANTE_SIDECAR_TOKEN`, and send `Authorization: Bearer <token>` from the
+  subrequests. A non-loopback bind without a token is refused.
+- Policy edits reload without restarting nginx or the sidecar: the sidecar
+  watches the file, accepts `SIGHUP`, and exposes `POST /-/reload`.
+- `-sidecar-cache-ttl` (default `1s`) skips decision round trips for repeated
+  cacheable requests; /v1/observe still mirrors every flow.
