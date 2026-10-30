@@ -132,7 +132,8 @@ func run(args []string, out io.Writer) error {
 	fs.Var(&agentArgs, "agent-arg", "CLI argument; repeat for each argv element; {prompt} inserts triage instructions")
 	agentTimeout := fs.Duration("agent-timeout", 30*time.Second, "Per-triage timeout for CLI or remote agent")
 	agentIPC := fs.String("agent-ipc", "", "Internal IPC address when running in -mode agent-worker")
-	configPath := fs.String("config", "", "Path to a config file (JSON or flat YAML) supplying defaults for any unset flag")
+	var configPaths stringListFlag
+	fs.Var(&configPaths, "config", "Config file (YAML or JSON); repeat in order, later files override earlier files; CLI flags win")
 
 	if err := fs.Parse(args); err != nil {
 		return err
@@ -140,7 +141,7 @@ func run(args []string, out io.Writer) error {
 
 	// Apply config-file values for any flag the user did not set explicitly
 	// (CLI flags always win). Each key maps to its flag.
-	cfg, err := loadConfig(*configPath)
+	cfg, err := loadConfigs(configPaths)
 	if err != nil {
 		return err
 	}

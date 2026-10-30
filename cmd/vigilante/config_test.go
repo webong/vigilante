@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
@@ -10,6 +11,88 @@ import (
 
 	"github.com/webong/vigilante/internal/policy"
 )
+
+func TestLoadConfigsOverrides(t *testing.T) {
+	dir := t.TempDir()
+	base := filepath.Join(dir, "base.yaml")
+	overlay := filepath.Join(dir, "overlay.json")
+	if err := os.WriteFile(base, []byte(`mode: inline
+transports: tcp,udp
+agent_args:
+  - run
+  - old
+decode_tls: true
+tls_keylog: /old.keys
+queue_size: 128
+sidecar_cache_ttl: 5s
+actions:
+  allow: [block]
+  webhook: https://old.example
+policy:
+  deny_cidrs:
+    - 192.0.2.0/24
+`), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(overlay, []byte(`{"agent_args":[],"decode_tls":false,"tls_keylog":"","queue_size":0,"sidecar_cache_ttl":0,"actions":{"dry_run":false},"policy":"replacement.yaml"}`), 0600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := loadConfigs([]string{base, overlay})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Mode != "inline" || cfg.Transports != "tcp,udp" || len(cfg.AgentArgs) != 0 || cfg.DecodeTLS == nil || *cfg.DecodeTLS || cfg.TLSKeyLog != "" || cfg.QueueSize != 0 {
+		t.Fatalf("incorrect overlay: %+v", cfg)
+	}
+	if !cfg.SidecarCacheTTLSet || cfg.SidecarCacheTTL != 0 {
+		t.Fatal("explicit zero lost")
+	}
+	if cfg.ActionAllow != "" || cfg.ActionWebhook != "" || cfg.ActionDryRun == nil || *cfg.ActionDryRun {
+		t.Fatal("actions section was not replaced")
+	}
+	if cfg.PolicyEngine != nil || cfg.Policy != "replacement.yaml" {
+		t.Fatal("old inline policy retained")
+	}
+	// YAML lists replace, rather than append to, a previous file's arguments.
+	if err := os.WriteFile(overlay, []byte("agent_args:\n  - new\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err = loadConfigs([]string{base, overlay})
+	if err != nil || len(cfg.AgentArgs) != 1 || cfg.AgentArgs[0] != "new" || !cfg.SidecarCacheTTLSet {
+		t.Fatalf("cfg=%+v err=%v", cfg, err)
+	}
+}
+
+func TestRepeatedConfigFlags(t *testing.T) {
+	dir := t.TempDir()
+	base, overlay := filepath.Join(dir, "base.yaml"), filepath.Join(dir, "overlay.yaml")
+	if err := os.WriteFile(base, []byte("mode: reverse\nprotocol: invalid\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(overlay, []byte("mode: inline\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	args := []string{"-config", base, "-config", overlay, "-inline-queue", "-1"}
+	err := run(args, &bytes.Buffer{})
+	if err == nil || !strings.Contains(err.Error(), "inline queue") {
+		t.Fatalf("later config not applied: %v", err)
+	}
+	err = run(append(args, "-mode", "reverse"), &bytes.Buffer{})
+	if err == nil || !strings.Contains(err.Error(), "reverse protocol") {
+		t.Fatalf("CLI did not override: %v", err)
+	}
+}
+
+func TestLoadConfigsRejectsInvalidEarlierFile(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "bad.yaml")
+	if err := os.WriteFile(path, []byte("unknown_setting: true\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	_, err := loadConfigs([]string{path, "unused.yaml"})
+	if err == nil || !strings.Contains(err.Error(), path) || !strings.Contains(err.Error(), "unknown") {
+		t.Fatalf("missing source error: %v", err)
+	}
+}
 
 func TestLoadConfigJSON(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "vig.json")

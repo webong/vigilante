@@ -143,13 +143,78 @@ type Config struct {
 // loadConfig reads a JSON or YAML config file; an empty path returns an empty
 // config.
 func loadConfig(path string) (Config, error) {
-	if path == "" {
-		return Config{}, nil
+	return loadConfigs([]string{path})
+}
+
+// loadConfigs overlays explicitly supplied keys, including zero values. Lists
+// and structured sections replace earlier values rather than accumulating.
+func loadConfigs(paths []string) (Config, error) {
+	var merged Config
+	for _, path := range paths {
+		if path == "" {
+			continue
+		}
+		data, err := os.ReadFile(path)
+		if err != nil {
+			return Config{}, fmt.Errorf("config: read %s: %w", path, err)
+		}
+		next, err := decodeConfig(data)
+		if err != nil {
+			return Config{}, fmt.Errorf("config %s: %w", path, err)
+		}
+		keys := configKeys(data)
+		dst, src := reflect.ValueOf(&merged).Elem(), reflect.ValueOf(next)
+		for i := 0; i < dst.NumField(); i++ {
+			field := dst.Type().Field(i)
+			key := strings.Split(field.Tag.Get("json"), ",")[0]
+			replace := keys[key]
+			switch {
+			case field.Name == "Policy" || field.Name == "PolicyEngine":
+				replace = keys["policy"]
+			case strings.HasPrefix(field.Name, "Action"):
+				replace = replace || keys["actions"]
+			case strings.HasPrefix(field.Name, "Alert"):
+				replace = replace || keys["alerts"]
+			case field.Name == "SidecarCacheTTLSet":
+				replace = keys["sidecar_cache_ttl"]
+			case field.Name == "EvalMinRecallSet":
+				replace = keys["eval_min_recall"]
+			case field.Name == "EvalMaxFPRSet":
+				replace = keys["eval_max_fpr"]
+			}
+			if replace {
+				dst.Field(i).Set(src.Field(i))
+			}
+		}
 	}
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return Config{}, fmt.Errorf("config: read %s: %w", path, err)
+	return merged, nil
+}
+
+// configKeys is called only after validation by the existing format decoder.
+// YAML configuration supports flat keys and indented structured sections.
+func configKeys(data []byte) map[string]bool {
+	keys := map[string]bool{}
+	data = bytes.TrimSpace(data)
+	if len(data) > 0 && data[0] == '{' {
+		var raw map[string]json.RawMessage
+		_ = json.Unmarshal(data, &raw)
+		for key := range raw {
+			keys[key] = true
+		}
+		return keys
 	}
+	for _, line := range strings.Split(string(data), "\n") {
+		if leadingSpaces(line) != 0 || strings.HasPrefix(strings.TrimSpace(line), "#") {
+			continue
+		}
+		if key, _, ok := strings.Cut(line, ":"); ok {
+			keys[strings.TrimSpace(key)] = true
+		}
+	}
+	return keys
+}
+
+func decodeConfig(data []byte) (Config, error) {
 	trimmed := bytes.TrimSpace(data)
 	if len(trimmed) == 0 {
 		return Config{}, nil

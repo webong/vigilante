@@ -8,7 +8,7 @@ speaks HTTP to the sidecar.
 ## 1. Run the sidecar
 
 ```sh
-vigilante -mode sidecar -sidecar-listen 127.0.0.1:9090 \
+vigilante run middle -sidecar-listen 127.0.0.1:9090 \
   -target http://127.0.0.1:3000 -policy /etc/vigilante/policy.yaml
 ```
 
@@ -16,25 +16,26 @@ If Traefik runs on another host, bind the sidecar to a reachable address and
 give it a token:
 
 ```sh
-VIGILANTE_SIDECAR_TOKEN=... vigilante -mode sidecar \
+VIGILANTE_SIDECAR_TOKEN=... vigilante run middle \
   -sidecar-listen 0.0.0.0:9090 -sidecar-allow-remote \
   -target http://app:3000 -policy /etc/vigilante/policy.yaml
 ```
 
 ## 2. Enable plugins in Traefik
 
-```yaml
-# traefik.yml (static)
-experimental:
-  plugins:
-    vigilante:
-      moduleName: github.com/webong/vigilante/pkg/traefik
-      version: v0.1.0
+The plugin is installed separately from the Vigilante executable. Use Traefik's
+[local plugin support](https://doc.traefik.io/traefik/master/reference/install-configuration/experimental/plugins/)
+without assuming a published plugin version exists.
+
+Download the Vigilante source archive matching your executable, then copy the
+contents of `pkg/traefik/` (including `.traefik.yml`) to:
+
+```text
+plugins-local/src/github.com/webong/vigilante/pkg/traefik/
 ```
 
-Traefik fetches the plugin from its module path, so this directory must be
-published (it is `pkg/traefik` in the Vigilante repository). For local
-experimentation use `localPlugins`:
+This path is relative to Traefik's working directory. For container deployments,
+mount that directory inside the Traefik container. Add to the static configuration:
 
 ```yaml
 experimental:
@@ -42,6 +43,10 @@ experimental:
     vigilante:
       moduleName: github.com/webong/vigilante/pkg/traefik
 ```
+
+Restart Traefik after changing its static configuration. A future catalog
+installation can use `experimental.plugins` with an actually published version;
+do not assume a sample version string is available.
 
 ## 3. Attach the middleware
 
