@@ -19,9 +19,6 @@ import (
 	"sort"
 	"strings"
 	"time"
-
-	"github.com/webong/vigilante/internal/history"
-	"github.com/webong/vigilante/internal/identity"
 )
 
 // Verdict is the model's judgement of one actor.
@@ -53,13 +50,41 @@ type RuleResult struct {
 	Signals []RuleSignal `json:"signals"`
 }
 
-// Input is what the model sees about one actor.
+// Identity is the verified (or failed) bot identity claim for an actor.
+type Identity struct {
+	Verified string `json:"verified,omitempty"`
+	Failed   string `json:"failed,omitempty"`
+}
+
+// Request is one recorded request from the actor. Header values are already
+// redacted by the host.
+type Request struct {
+	Timestamp  time.Time         `json:"timestamp"`
+	Method     string            `json:"method,omitempty"`
+	Path       string            `json:"path,omitempty"`
+	Host       string            `json:"host,omitempty"`
+	Status     int               `json:"status,omitempty"`
+	DurationMS float64           `json:"duration_ms,omitempty"`
+	Verdict    string            `json:"verdict,omitempty"`
+	Severity   string            `json:"severity,omitempty"`
+	UserAgent  string            `json:"user_agent,omitempty"`
+	Headers    map[string]string `json:"headers,omitempty"`
+}
+
+// Input is what a triage guest sees about one actor. Every type in it is part
+// of the vigilante.triage@v1 wire contract, so a guest needs nothing from
+// vigilante's core to decode it.
 type Input struct {
-	IP             string          `json:"ip"`
-	TLSFingerprint string          `json:"tls_fingerprint,omitempty"`
-	Identity       identity.Result `json:"identity"`
-	Rules          RuleResult      `json:"rules"`
-	Requests       []history.Flow  `json:"requests"` // oldest first
+	IP             string     `json:"ip"`
+	TLSFingerprint string     `json:"tls_fingerprint,omitempty"`
+	Identity       Identity   `json:"identity"`
+	Rules          RuleResult `json:"rules"`
+	// Requests are the most recent requests, oldest first, at most
+	// MaxRequests of them.
+	Requests []Request `json:"requests"`
+	// TotalRequests counts every request in the window, including those
+	// trimmed from Requests.
+	TotalRequests int `json:"total_requests"`
 }
 
 // Provider sends one system + user prompt to a model and returns the text of
@@ -123,8 +148,8 @@ var verdictSchema = json.RawMessage(`{
   }
 }`)
 
-// maxSample bounds how many raw requests the model sees per actor.
-const maxSample = 80
+// MaxRequests bounds how many raw requests the host sends per actor.
+const MaxRequests = 80
 
 // Triage asks the model for a verdict on one actor.
 func (t *Triager) Triage(ctx context.Context, in Input) (Verdict, error) {
@@ -151,9 +176,10 @@ func (t *Triager) Triage(ctx context.Context, in Input) (Verdict, error) {
 // of raw requests, inside <actor> so the prompt can mark it untrusted.
 func render(in Input) (string, error) {
 	sample := in.Requests
-	if len(sample) > maxSample {
-		sample = sample[len(sample)-maxSample:]
+	if len(sample) > MaxRequests {
+		sample = sample[len(sample)-MaxRequests:]
 	}
+	total := max(in.TotalRequests, len(in.Requests))
 	type line struct {
 		T          string            `json:"t"`
 		Method     string            `json:"method"`
@@ -173,7 +199,7 @@ func render(in Input) (string, error) {
 			Method:     r.Method,
 			Target:     target,
 			Status:     r.Status,
-			MS:         r.Duration.Seconds() * 1000,
+			MS:         r.DurationMS,
 			Action:     r.Verdict,
 			HeaderVals: hintHeaders(r.Headers),
 		}
@@ -187,7 +213,7 @@ func render(in Input) (string, error) {
 		"tls_fingerprint": in.TLSFingerprint,
 		"identity":        in.Identity,
 		"rules":           in.Rules,
-		"requests_shown":  fmt.Sprintf("last %d of %d", len(sample), len(in.Requests)),
+		"requests_shown":  fmt.Sprintf("last %d of %d", len(sample), total),
 		"requests":        lines,
 	}, "", " ")
 	if err != nil {

@@ -36,14 +36,14 @@ func TriageActorMethod() author.Method[Input, Verdict] {
 	}
 }
 
-// Identity identifies the triage guest.
-func Identity() engine.Identity {
+// GuestIdentity identifies the triage guest.
+func GuestIdentity() engine.Identity {
 	return engine.Identity{ID: "vigilante/actor-triage", Revision: "v1.0.0", Version: "1.0.0"}
 }
 
 // BuildGuest constructs the ext.plugin/v1 guest serving triage-actor.
 func BuildGuest(handler Handler) (engine.Descriptor, *engine.Guest, error) {
-	reg, err := author.New(Identity())
+	reg, err := author.New(GuestIdentity())
 	if err != nil {
 		return engine.Descriptor{}, nil, err
 	}

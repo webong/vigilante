@@ -646,17 +646,11 @@ func (e Extension) dashboardTriage(w http.ResponseWriter, r *http.Request, id in
 		return
 	}
 	ip, _ := actorKeyToIPJA4(found.Key)
-	in := triage.Input{
-		IP:             ip,
-		TLSFingerprint: found.Fingerprint,
-		Identity:       identity.Result{Verified: found.Identity},
-		Rules: triage.RuleResult{
-			Score:   found.Risk,
-			Class:   found.Class,
-			Signals: ruleSignals(found.Signals),
-		},
-		Requests: flows,
-	}
+	in := triage.NewInput(ip, found.Fingerprint, identity.Result{Verified: found.Identity}, triage.RuleResult{
+		Score:   found.Risk,
+		Class:   found.Class,
+		Signals: ruleSignals(found.Signals),
+	}, flows)
 	verdict, err := e.Triager.Triage(ctx, in)
 	if err != nil {
 		extensionJSON(w, nil, err)

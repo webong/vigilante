@@ -85,6 +85,28 @@ An `ext.plugin/v1` guest can call `vigilante.host@v1/lookup-advisories` with `{ 
 
 Installed package, network exposure, and vulnerable-code reachability are distinct findings. The built-in detector reports request indicators only. Agents should cite evidence before claiming exposure or reachability.
 
+## Actor triage
+
+Flow triage (above) judges one request. Actor triage judges a client over time:
+with a history store, behavior rules score each actor (IP + TLS fingerprint),
+and actors scoring at least `-triage-min-score` (default 25) but below
+`-behavior-min-score` (default 80; at or above it the rules suggest directly) are sent to a model for a classification, risk,
+evidence and recommended action. The result becomes a **suggestion** in the
+review queue; a human approves it before anything is enforced.
+
+```sh
+-triage -triage-provider anthropic -triage-model claude-opus-5-5   # or openrouter (default)
+VIGILANTE_TRIAGE_API_KEY=...                                       # or -triage-api-key
+-triage-effort low|medium|high
+```
+
+Actor triage runs behind the `ext.plugin/v1` contract `vigilante.triage@v1`
+(`triage-actor`, in [`ext/triage`](../ext/triage)). The Anthropic and
+OpenRouter providers are the built-in guest. The wire input carries the
+actor's IP, fingerprint, identity claim, rule signals, the most recent 80
+requests (oldest first, already redacted) and the total count; a guest needs
+nothing from Vigilante's core to decode it.
+
 ## Configuration details
 
 Settings can live in one `vigilante.yaml` (or JSON), or be split across several files: proxy settings, policy rules, allowed actions, and alert destinations. CLI flags override file values. Unknown keys are rejected so typos surface immediately. See [`deploy/vigilante.yaml.example`](../deploy/vigilante.yaml.example).

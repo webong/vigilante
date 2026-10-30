@@ -33,10 +33,9 @@ func TestTriageParsesVerdictAndClampsBounds(t *testing.T) {
 	in := Input{
 		IP:             "203.0.113.10",
 		TLSFingerprint: "t13d1516h2",
-		Identity:       identity.Result{},
 		Rules:          RuleResult{Score: 60, Class: "automation", Signals: []RuleSignal{{Code: "accepts_markdown", Weight: 15, Detail: "asks for markdown"}}},
-		Requests: []history.Flow{
-			{Event: flow.Event{Timestamp: time.Now().UTC(), Method: "GET", Path: "/", Status: 200, Duration: time.Second}},
+		Requests: []Request{
+			{Timestamp: time.Now().UTC(), Method: "GET", Path: "/", Status: 200, DurationMS: 1000},
 		},
 	}
 	v, err := tg.Triage(context.Background(), in)
@@ -72,11 +71,12 @@ func TestTriagePropagatesProviderError(t *testing.T) {
 func TestRenderContainsActorFields(t *testing.T) {
 	in := Input{
 		IP:       "203.0.113.10",
-		Identity: identity.Result{Verified: "Googlebot"},
+		Identity: Identity{Verified: "Googlebot"},
 		Rules:    RuleResult{Score: 40, Class: "crawler"},
-		Requests: []history.Flow{
-			{Event: flow.Event{Timestamp: time.Now().UTC(), Method: "GET", Path: "/index.html", Status: 200, UserAgent: "Mozilla/5.0", Headers: map[string]string{"Accept": "text/html", "Sec-Fetch-Mode": "navigate"}}},
+		Requests: []Request{
+			{Timestamp: time.Now().UTC(), Method: "GET", Path: "/index.html", Status: 200, UserAgent: "Mozilla/5.0", Headers: map[string]string{"Accept": "text/html", "Sec-Fetch-Mode": "navigate"}},
 		},
+		TotalRequests: 500,
 	}
 	payload, err := render(in)
 	if err != nil {
@@ -91,7 +91,28 @@ func TestRenderContainsActorFields(t *testing.T) {
 	if !strings.Contains(payload, "/index.html") {
 		t.Errorf("payload missing request path")
 	}
+	if !strings.Contains(payload, "last 1 of 500") {
+		t.Errorf("payload missing trimmed count")
+	}
 	if !strings.Contains(payload, "<actor>") {
 		t.Errorf("payload missing actor wrapper")
+	}
+}
+
+func TestNewInputTrimsToRecentRequests(t *testing.T) {
+	base := time.Date(2026, 10, 30, 12, 0, 0, 0, time.UTC)
+	flows := make([]history.Flow, MaxRequests+20)
+	for i := range flows {
+		flows[i] = history.Flow{Event: flow.Event{Timestamp: base.Add(time.Duration(i) * time.Second), Path: "/p", Duration: 250 * time.Millisecond}}
+	}
+	in := NewInput("203.0.113.1", "fp", identity.Result{Failed: "Googlebot"}, RuleResult{Score: 30}, flows)
+	if in.TotalRequests != MaxRequests+20 || len(in.Requests) != MaxRequests {
+		t.Fatalf("total=%d sent=%d", in.TotalRequests, len(in.Requests))
+	}
+	if !in.Requests[0].Timestamp.Equal(base.Add(20*time.Second)) || in.Requests[0].DurationMS != 250 {
+		t.Fatalf("first sent=%+v, want the oldest of the most recent %d", in.Requests[0], MaxRequests)
+	}
+	if in.Identity.Failed != "Googlebot" {
+		t.Fatalf("identity=%+v", in.Identity)
 	}
 }

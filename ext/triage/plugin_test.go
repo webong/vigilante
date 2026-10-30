@@ -4,9 +4,6 @@ import (
 	"context"
 	"testing"
 	"time"
-
-	"github.com/webong/vigilante/internal/flow"
-	"github.com/webong/vigilante/internal/history"
 )
 
 func TestClientRoundTripsThroughPlugin(t *testing.T) {
@@ -25,7 +22,7 @@ func TestClientRoundTripsThroughPlugin(t *testing.T) {
 	v, err := svc.Triage(ctx, Input{
 		IP:       "203.0.113.7",
 		Rules:    RuleResult{Score: 70, Class: "scanner", Signals: []RuleSignal{{Code: "attack", Weight: 40}}},
-		Requests: []history.Flow{{Event: flow.Event{Timestamp: time.Now().UTC(), Method: "GET", Path: "/.env", Status: 404, Headers: map[string]string{"Accept": "*/*"}}}},
+		Requests: []Request{{Timestamp: time.Now().UTC(), Method: "GET", Path: "/.env", Status: 404, Headers: map[string]string{"Accept": "*/*"}}},
 	})
 	if err != nil {
 		t.Fatalf("triage: %v", err)

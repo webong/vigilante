@@ -137,17 +137,11 @@ func (s Sink) triageApplies(score int) bool {
 }
 
 func (s Sink) triageSuggest(ctx context.Context, ev flow.Event, flows []history.Flow, id identity.Result, result Result, actorKey string) (bool, error) {
-	in := triage.Input{
-		IP:             decision.NormalizeIP(ev.SrcAddr),
-		TLSFingerprint: ev.TLSFingerprint,
-		Identity:       id,
-		Rules: triage.RuleResult{
-			Score:   result.Score,
-			Class:   result.Class,
-			Signals: ruleSignals(result.Signals),
-		},
-		Requests: flows,
-	}
+	in := triage.NewInput(decision.NormalizeIP(ev.SrcAddr), ev.TLSFingerprint, id, triage.RuleResult{
+		Score:   result.Score,
+		Class:   result.Class,
+		Signals: ruleSignals(result.Signals),
+	}, flows)
 	verdict, err := s.Triager.Triage(ctx, in)
 	if err != nil {
 		return false, err
