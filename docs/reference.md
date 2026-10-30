@@ -37,28 +37,30 @@ Triage runs behind one `ext.plugin/v1` contract (`vigilante.agent@v1`); the impl
 | Backend | What it is |
 | --- | --- |
 | `builtin` (default) | Small in-process detector for obvious request indicators. It does not research advisories or infer vulnerable-code reachability. |
+| `opencode`, `claude`, `codex` | Run the named local CLI with a non-interactive preset; the triage prompt and enriched envelope arrive on stdin. |
 | `cli` or `cli:<cmd>` | Run a local agent executable with configurable argv: enriched envelope JSON on stdin. It may return verdict JSON or complete without output. Falls back to builtin on failure. |
 | `remote:<https-url>` | POST a host-collected evidence envelope to a local service or cloud agent. A verdict response is optional. |
 | `supervised` | Out-of-process built-in worker via `ext/res/system/supervisor` + jsonline IPC; the plugin contract also supports custom guests. |
 
 ```sh
 -agent builtin
+-agent opencode
+-agent claude
+-agent codex
 -agent cli:/usr/local/bin/my-triage-agent
 -agent remote:https://agent.example.com/v1/triage
 -agent supervised
 ```
 
-CLI agents must run noninteractively. Configure the executable and each argument separately; `{prompt}` is replaced with Vigilante's triage instructions, while the full envelope arrives on stdin. For example, OpenCode:
+CLI agents must run noninteractively. The named presets invoke `opencode run -`, `claude -p`, or `codex exec -` with the prompt and envelope on stdin. For example:
 
 ```yaml
-agent: cli
-agent_command: opencode
-agent_args:
-  - run
-  - '{prompt}'
+agent: opencode
 agent_dir: /srv/my-service
 agent_timeout: 2m
 ```
+
+Override `agent_command`, `agent_args`, or `agent_input` for a customized installation. Generic CLI agents receive envelope JSON on stdin by default; `{prompt}` in an argument is replaced with Vigilante's triage instructions.
 
 Equivalent CLI flags are `-agent cli -agent-command opencode -agent-arg run -agent-arg '{prompt}' -agent-dir /srv/my-service`. Other examples are `claude` with arguments `-p`, `{prompt}`; `codex` with `exec`, `{prompt}`; and `gemini` with `-p`, `{prompt}`. These use each CLI's default text output. Avoid JSON event stream flags unless an adapter extracts the final message. For a CLI that reads the entire prompt from stdin, use `agent_input: prompt` and omit `{prompt}` from its args (for Codex, `exec`, `-` is one such form). `agent_dir` selects where the CLI discovers project configuration and skills. Configure authentication, model, tools, skills, and result storage in the chosen agent. A successfully exiting CLI with empty stdout means it handled delivery itself.
 

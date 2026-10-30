@@ -112,8 +112,14 @@ func cliTriage(ctx context.Context, opts CLIOptions, env EnrichedEnvelope) (Verd
 	if perr != nil {
 		return Verdict{}, fmt.Errorf("cli agent: parse output: %w", perr)
 	}
+	if verdict.FlowID != "" && verdict.FlowID != env.Event.FlowID {
+		return Verdict{}, fmt.Errorf("cli agent returned a different flow_id")
+	}
 	if verdict.FlowID == "" {
 		verdict.FlowID = env.Event.FlowID
+	}
+	if !validSeverity(verdict.Severity) || strings.TrimSpace(verdict.Action) == "" || strings.TrimSpace(verdict.Summary) == "" {
+		return Verdict{}, fmt.Errorf("cli agent returned an incomplete verdict")
 	}
 	return verdict, nil
 }
@@ -125,7 +131,8 @@ func runWithStdin(ctx context.Context, opts CLIOptions, stdin []byte) ([]byte, e
 	cmd.Dir = opts.Dir
 	cmd.Stdin = bytes.NewReader(stdin)
 	var stdout, stderr bytes.Buffer
-	cmd.Stdout = &stdout
+	// One extra byte distinguishes an exactly 1 MiB answer from an oversized one.
+	cmd.Stdout = &limitedBuffer{buf: &stdout, limit: 1 << 20}
 	cmd.Stderr = &stderr
 	if len(opts.Env) > 0 {
 		cmd.Env = append(os.Environ(), opts.Env...)
@@ -133,7 +140,30 @@ func runWithStdin(ctx context.Context, opts CLIOptions, stdin []byte) ([]byte, e
 	if err := cmd.Run(); err != nil {
 		return nil, fmt.Errorf("%w: %s", err, strings.TrimSpace(stderr.String()))
 	}
+	if stdout.Len() > 1<<20 {
+		return nil, fmt.Errorf("cli agent: response exceeds 1 MiB")
+	}
 	return stdout.Bytes(), nil
+}
+
+// limitedBuffer discards output beyond limit while retaining one overflow byte.
+// The command can finish normally, but the oversized answer is never buffered
+// without bound or accepted as a verdict.
+type limitedBuffer struct {
+	buf   *bytes.Buffer
+	limit int
+}
+
+func (w *limitedBuffer) Write(p []byte) (int, error) {
+	n := len(p)
+	remaining := w.limit + 1 - w.buf.Len()
+	if remaining > 0 {
+		if len(p) > remaining {
+			p = p[:remaining]
+		}
+		_, _ = w.buf.Write(p)
+	}
+	return n, nil
 }
 
 // ParseVerdictOutput extracts a Verdict JSON object from command output. It

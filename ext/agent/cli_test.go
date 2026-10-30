@@ -134,6 +134,35 @@ func TestCLIHandlerFallsBackOnFailure(t *testing.T) {
 	}
 }
 
+func TestCLIProbeRejectsInvalidVerdicts(t *testing.T) {
+	for _, tc := range []struct{ name, output, want string }{
+		{"flow mismatch", `{"flow_id":"other","severity":"high","action":"alert","summary":"stale"}`, "different flow_id"},
+		{"invalid severity", `{"severity":"urgent","action":"alert","summary":"bad"}`, "incomplete verdict"},
+		{"missing action", `{"severity":"high","summary":"bad"}`, "incomplete verdict"},
+		{"missing summary", `{"severity":"high","action":"alert"}`, "incomplete verdict"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			h := NewCLIProbeHandler(CLIOptions{Command: "fake", Run: func(context.Context, string, ...string) ([]byte, error) {
+				return []byte(tc.output), nil
+			}})
+			_, err := h(context.Background(), sampleEnv())
+			if err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("error = %v, want %q", err, tc.want)
+			}
+		})
+	}
+}
+
+func TestCLIOutputLimit(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("requires sh")
+	}
+	_, err := runWithStdin(context.Background(), CLIOptions{Command: "sh", Args: []string{"-c", "head -c 1048577 /dev/zero"}}, nil)
+	if err == nil || !strings.Contains(err.Error(), "exceeds 1 MiB") {
+		t.Fatalf("oversized output error = %v", err)
+	}
+}
+
 func TestCLIHandlerUnparseableOutputFallsBack(t *testing.T) {
 	h := NewCLIHandler(CLIOptions{
 		Command: "bad",
