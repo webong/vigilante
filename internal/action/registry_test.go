@@ -172,6 +172,9 @@ func TestTTLClampedToHostCeiling(t *testing.T) {
 	if got := d.ExpiresAt.Sub(d.StartedAt); got != 2*time.Hour {
 		t.Fatalf("ttl = %s, want the 2h host ceiling", got)
 	}
+	if got := ex.executed[0].TTL; got != 2*time.Hour {
+		t.Fatalf("executor saw ttl %s, want the clamped 2h", got)
+	}
 }
 
 func TestRevertRemovesAndUndoes(t *testing.T) {

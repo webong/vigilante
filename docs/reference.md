@@ -356,6 +356,7 @@ about it. Actions are pluggable, allowlisted, audited, and always time-bounded.
 | --- | --- |
 | `block` (built-in) | Drops the source at the host firewall (`log`/`iptables`/`nft`). |
 | `notify` (remote) | Calls any HTTP API — a WAF, load balancer, ticketing system, on-call pager — with a templated request. |
+| *plugin* | Any `vigilante.action@v1` executor loaded with `-action-plugin`; its id comes from the guest's capability. |
 
 ```sh
 -action-allow block,notify     # only these ids may run; empty denies everything
@@ -366,6 +367,24 @@ about it. Actions are pluggable, allowlisted, audited, and always time-bounded.
 -action-webhook-revert https://api.cloudflare.com/client/v4/zones/$ZONE/rulesets/$ID/rules/{ref}
 -action-webhook-token "$CF_TOKEN"
 ```
+
+An executor plugin is a binary that serves the contract in
+[`ext/executor`](../ext/executor):
+
+```go
+func main() {
+    _ = executor.RunWorkerIPC(context.Background(), os.Getenv(executor.IPCEnv), myExecutor{})
+}
+```
+
+```sh
+-action-plugin /opt/vigilante/cloudflare-waf -action-allow block,cf_waf
+```
+
+The host checksums and supervises the binary, reads its capability over
+`describe`, and registers it behind the same allowlist, scope check,
+confirmation, TTL ceiling, audit and revert as the built-ins. Requests reach the
+guest only after those checks, with the TTL already clamped.
 
 Remote URLs and bodies are templates over `{target}`, `{scope}`, `{action}`,
 `{reason}`, `{ttl}`, and `{ref}`. A create response may return `{"id": "..."}`
@@ -538,7 +557,7 @@ Source layout:
 | --- | --- |
 | `internal/` | The core: policy, gate, flow, decisions, action registry and executors, TLS fingerprinting, identity, redaction, behavior rules, history. |
 | `pkg/` | Public core packages and ingress integrations meant to be imported (`tap`, `ingress`, `caddy`, `traefik`). |
-| `ext/` | Only `ext.plugin/v1` extensions with a versioned contract: `agent` (`vigilante.agent@v1`), `obs` (`vigilante.obs@v1`) and `triage` (`vigilante.triage@v1`, LLM actor triage). A package belongs here only if it can run as an engine guest; plain separation of concerns goes in `internal/`. |
+| `ext/` | Only `ext.plugin/v1` extensions with a versioned contract: `agent` (`vigilante.agent@v1`), `obs` (`vigilante.obs@v1`), `triage` (`vigilante.triage@v1`, LLM actor triage) and `executor` (`vigilante.action@v1`, third-party action executors). A package belongs here only if it can run as an engine guest; plain separation of concerns goes in `internal/`. |
 
 ```sh
 go test -race -v ./...

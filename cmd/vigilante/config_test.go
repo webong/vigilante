@@ -209,13 +209,20 @@ func TestLoadConfigNewKeysYAML(t *testing.T) {
 		"obs: false\n" +
 		"passive_iface: eth0\n" +
 		"passive_ports: 80,443\n" +
-		"sample_rate: 0.25\n"
+		"sample_rate: 0.25\n" +
+		"actions:\n" +
+		"  allow: [cf_waf]\n" +
+		"  plugins:\n" +
+		"    - /opt/vigilante/cloudflare-waf\n"
 	if err := os.WriteFile(path, []byte(data), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	cfg, err := loadConfig(path)
 	if err != nil {
 		t.Fatal(err)
+	}
+	if len(cfg.ActionPlugins) != 1 || cfg.ActionPlugins[0] != "/opt/vigilante/cloudflare-waf" || cfg.ActionAllow != "cf_waf" {
+		t.Errorf("action_plugins = %v", cfg.ActionPlugins)
 	}
 	if cfg.Agent != "cli" || cfg.AgentCommand != "claude" || len(cfg.AgentArgs) != 2 || cfg.AgentArgs[0] != "-p" || cfg.AgentArgs[1] != "{prompt}" {
 		t.Errorf("agent config = %+v", cfg)

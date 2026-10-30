@@ -174,6 +174,9 @@ func (r *Registry) Execute(ctx context.Context, req Request) (Decision, error) {
 	req.ID = d.ID
 	req.Scope = scope
 	req.DryRun = dryRun
+	// Executors see the clamped TTL, so a remote rule cannot outlive the
+	// host's ceiling if the host dies before reaping it.
+	req.TTL = ttl
 
 	runCtx := ctx
 	if runCtx == nil {

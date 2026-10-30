@@ -86,8 +86,8 @@ stores that handle and passes it back as `{ref}` on revert. This is enough to
 express a Cloudflare ruleset change, a load-balancer deny entry, or a ticket,
 without a per-vendor package.
 
-A vendor with a stateful or non-HTTP protocol adds an executor package instead of
-bending the template.
+A vendor with a stateful or non-HTTP protocol ships an executor plugin instead
+of bending the template (see §6).
 
 ### 5. Every action is time-bounded and reversible by default
 
@@ -96,6 +96,22 @@ the host default (1 hour), clamped by the host ceiling. On expiry the registry
 reverts the external change and removes the snapshot entry. Actions that cannot
 be undone must say so in their capability; the registry still removes the
 snapshot entry and records that the remote side was not reverted.
+
+### 6. Third-party executors are `vigilante.action@v1` plugins
+
+`ext/executor` publishes the executor contract as an `ext.plugin/v1` guest with
+three operations: `describe` (returns the capability), `execute`, and `revert`.
+The wire types are public and carry durations as whole seconds, so a guest can
+be written outside this module or in another language.
+
+The host side is `executor.Client`, which implements `action.Executor` and is
+registered with the registry like a built-in. Every rail in §2 runs **before**
+a request crosses the wire: the guest never sees a disallowed action, an
+undeclared scope, an unconfirmed destructive request, or an unclamped TTL.
+Operators load guests with `-action-plugin <binary>` (or `action_plugins:` in
+config); each runs under `res/system/supervisor`, pinned by SHA-256 and
+terminated with the host. A guest's capability is still inert until its ID is
+in `-action-allow`.
 
 ## Consequences
 
@@ -138,6 +154,7 @@ snapshot entry and records that the remote side was not reverted.
 | Enforcement snapshot | `internal/decision/decision.go` |
 | Built-in block executor | `internal/action/block/block.go` |
 | Remote/HTTP executor | `internal/action/remote/remote.go` |
+| Executor plugin contract (`vigilante.action@v1`) | `ext/executor` |
 | Wiring and flags | `cmd/vigilante/main.go` |
 | Config keys | `cmd/vigilante/config.go`, `deploy/vigilante.yaml.example` |
 | End-to-end test | `internal/gate/chain_test.go` |

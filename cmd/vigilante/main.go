@@ -30,6 +30,7 @@ import (
 	"github.com/webong/ext/res/system/graph"
 	"github.com/webong/ext/res/system/supervisor"
 	"github.com/webong/vigilante/ext/agent"
+	"github.com/webong/vigilante/ext/executor"
 	"github.com/webong/vigilante/ext/obs"
 	"github.com/webong/vigilante/ext/triage"
 	"github.com/webong/vigilante/internal/action"
@@ -115,6 +116,8 @@ func run(args []string, out io.Writer) error {
 	actionWebhook := fs.String("action-webhook", "", "Optional remote action endpoint (e.g. a WAF API); enables the notify action")
 	actionWebhookBody := fs.String("action-webhook-body", "", "JSON body template for -action-webhook ({target},{scope},{reason},{ttl})")
 	actionWebhookRevert := fs.String("action-webhook-revert", "", "Revert URL template for -action-webhook ({ref}) so expiring decisions undo themselves")
+	var actionPlugins stringListFlag
+	fs.Var(&actionPlugins, "action-plugin", "vigilante.action@v1 executor binary to launch under the supervisor; repeat for each (still subject to -action-allow)")
 	actionWebhookToken := fs.String("action-webhook-token", "", "Bearer token sent to -action-webhook (prefer the config file over argv)")
 	alertFile := fs.String("alert-file", "", "Path to the JSONL alert store (enables persistence; rotated by size)")
 	alertMinSev := fs.String("alert-min-severity", "", "Minimum verdict severity to record/deliver: info, low, medium, high, critical")
@@ -213,6 +216,9 @@ func run(args []string, out io.Writer) error {
 	applyStr(set["agent-input"], agentInput, cfg.AgentInput)
 	if !set["agent-arg"] {
 		agentArgs = append(agentArgs, cfg.AgentArgs...)
+	}
+	if !set["action-plugin"] {
+		actionPlugins = append(actionPlugins, cfg.ActionPlugins...)
 	}
 	applyStr(set["gateway"], gatewayPosture, cfg.Gateway)
 	applyStr(set["listen"], listenAddr, cfg.Listen)
@@ -563,6 +569,17 @@ func run(args []string, out io.Writer) error {
 		if err := registry.Register(re); err != nil {
 			return err
 		}
+	}
+	for _, cmd := range actionPlugins {
+		client, err := executor.Launch(ctx, executor.LaunchOptions{Store: store, Command: cmd})
+		if err != nil {
+			return fmt.Errorf("launch action plugin %s: %w", cmd, err)
+		}
+		defer func() { _ = client.Close(context.Background()) }()
+		if err := registry.Register(client); err != nil {
+			return fmt.Errorf("register action plugin %s: %w", cmd, err)
+		}
+		fmt.Fprintf(out, "[vigilante] action plugin %s: %s (ext.plugin/v1 vigilante.action@v1)\n", client.Capability().ID, cmd)
 	}
 	stopReaper := registry.StartReaper(ctx, 30*time.Second)
 	defer stopReaper()

@@ -122,6 +122,10 @@ actions:
   # webhook_body: '{"mode":"block","target":"{target}","note":"{reason}"}'
   # webhook_revert: https://api.example.com/zones/ZONE/rules/{ref}
   # webhook_token: changeme   # sent as "Authorization: Bearer <token>"
+  # Executor plugins (ext.plugin/v1 vigilante.action@v1), launched under the
+  # supervisor and checksum-pinned. Add each plugin's capability id to `allow`.
+  # plugins:
+  #   - /opt/vigilante/cloudflare-waf
 
 # Actor aggregation (served as data at /obs/actors)
 actor_window: 24h           # sliding window over which risk is scored

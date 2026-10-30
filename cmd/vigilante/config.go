@@ -134,6 +134,10 @@ type Config struct {
 	ActionWebhookBody   string        `yaml:"action_webhook_body" json:"action_webhook_body"`
 	ActionWebhookRevert string        `yaml:"action_webhook_revert" json:"action_webhook_revert"`
 	ActionWebhookToken  string        `yaml:"action_webhook_token" json:"action_webhook_token"`
+	// ActionPlugins are vigilante.action@v1 executor binaries launched under
+	// the supervisor (actions.plugins). Their capabilities still need
+	// -action-allow.
+	ActionPlugins []string `yaml:"action_plugins" json:"action_plugins"`
 
 	AlertFile        string `yaml:"alert_file" json:"alert_file"`
 	AlertDeliver     string `yaml:"alert_deliver_url" json:"alert_deliver_url"`
@@ -300,6 +304,7 @@ type jsonActions struct {
 	WebhookBody   string   `json:"webhook_body"`
 	WebhookRevert string   `json:"webhook_revert"`
 	WebhookToken  string   `json:"webhook_token"`
+	Plugins       []string `json:"plugins"`
 }
 
 // jsonAlerts is the inline `alerts:` shape.
@@ -350,6 +355,7 @@ func (c *Config) setActionsJSON(raw json.RawMessage) error {
 	if err := dec.Decode(&a); err != nil {
 		return fmt.Errorf("config: actions: %w", err)
 	}
+	c.ActionPlugins = append(c.ActionPlugins, a.Plugins...)
 	return c.applyActions(a.Allow, a.DryRun, a.TTL, a.MaxTTL, a.Webhook, a.WebhookBody, a.WebhookRevert, a.WebhookToken)
 }
 
@@ -467,10 +473,10 @@ func decodeYAML(data []byte) (Config, error) {
 			val = strings.Trim(val, `"'`)
 		}
 
-		if (key == "agent_args" || key == "decoder_args") && val == "" {
+		if (key == "agent_args" || key == "decoder_args" || key == "action_plugins") && val == "" {
 			block, next, err := captureBlock(lines, i+1)
 			if err != nil {
-				return Config{}, fmt.Errorf("config: agent_args: %w", err)
+				return Config{}, fmt.Errorf("config: %s: %w", key, err)
 			}
 			i = next - 1
 			for _, rawArg := range strings.Split(block, "\n") {
@@ -479,12 +485,15 @@ func decodeYAML(data []byte) (Config, error) {
 					continue
 				}
 				if !strings.HasPrefix(arg, "- ") {
-					return Config{}, fmt.Errorf("config: agent_args: expected list item, got %q", arg)
+					return Config{}, fmt.Errorf("config: %s: expected list item, got %q", key, arg)
 				}
 				value := strings.Trim(strings.TrimSpace(strings.TrimPrefix(arg, "- ")), `"'`)
-				if key == "decoder_args" {
+				switch key {
+				case "decoder_args":
 					c.DecoderArgs = append(c.DecoderArgs, value)
-				} else {
+				case "action_plugins":
+					c.ActionPlugins = append(c.ActionPlugins, value)
+				default:
 					c.AgentArgs = append(c.AgentArgs, value)
 				}
 			}
@@ -593,8 +602,8 @@ func (c *Config) applyActionsYAML(block string) error {
 		key = strings.TrimSpace(key)
 		val = strings.Trim(strings.TrimSpace(val), `"'"`)
 		if val == "" {
-			// A block list (only `allow` takes one).
-			if key != "allow" {
+			// A block list (only `allow` and `plugins` take one).
+			if key != "allow" && key != "plugins" {
 				return fmt.Errorf("config: actions: %q requires a value", key)
 			}
 			for i+1 < len(lines) {
@@ -606,7 +615,12 @@ func (c *Config) applyActionsYAML(block string) error {
 				if !strings.HasPrefix(next, "- ") && next != "-" {
 					break
 				}
-				allow = append(allow, strings.Trim(strings.TrimSpace(strings.TrimPrefix(next, "- ")), `"'"`))
+				item := strings.Trim(strings.TrimSpace(strings.TrimPrefix(next, "- ")), `"'"`)
+				if key == "plugins" {
+					c.ActionPlugins = append(c.ActionPlugins, item)
+				} else {
+					allow = append(allow, item)
+				}
 				i++
 			}
 			continue
@@ -614,6 +628,8 @@ func (c *Config) applyActionsYAML(block string) error {
 		switch key {
 		case "allow":
 			allow = append(allow, parseFlowList(val)...)
+		case "plugins":
+			c.ActionPlugins = append(c.ActionPlugins, parseFlowList(val)...)
 		case "dry_run":
 			b, err := strconv.ParseBool(val)
 			if err != nil {

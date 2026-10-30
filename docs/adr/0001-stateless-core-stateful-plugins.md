@@ -162,8 +162,9 @@ The amendment narrows the rule:
   in `ext/` only when it sits behind a versioned contract and an
   `engine.Session`, so it can be replaced or run out of process without a core
   release. Today that is `vigilante.agent@v1` (flow triage),
-  `vigilante.obs@v1` (data API and dashboard), and `vigilante.triage@v1`
-  (LLM actor triage). Packages split out only for separation of concerns belong
+  `vigilante.obs@v1` (data API and dashboard), `vigilante.triage@v1`
+  (LLM actor triage), and `vigilante.action@v1` (third-party action
+  executors). Packages split out only for separation of concerns belong
   in `internal/` (or `pkg/` when meant to be imported).
 
 A component is a plugin when it is swappable by nature: it calls a model or
