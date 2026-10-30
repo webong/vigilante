@@ -26,8 +26,8 @@ import (
 	"github.com/webong/ext/res/system"
 	"github.com/webong/ext/res/system/graph"
 	"github.com/webong/ext/res/system/network"
-	"github.com/webong/vigilante/ext/redact"
 	"github.com/webong/vigilante/internal/deps"
+	"github.com/webong/vigilante/internal/redact"
 	"github.com/webong/vigilante/internal/repo"
 )
 
@@ -59,8 +59,14 @@ type PacketEvent struct {
 	Path              string            `json:"path,omitempty"`
 	Headers           map[string]string `json:"headers,omitempty"`
 	TLSFingerprint    string            `json:"tls_fingerprint,omitempty"`
+	JA4               string            `json:"ja4,omitempty"`
 	PayloadPreview    string            `json:"payload_preview,omitempty"`
 	PayloadBytes      int               `json:"payload_bytes"`
+	Host              string            `json:"host,omitempty"`
+	Status            int               `json:"status,omitempty"`
+	Duration          time.Duration     `json:"duration,omitempty"`
+	BytesIn           int64             `json:"bytes_in,omitempty"`
+	BytesOut          int64             `json:"bytes_out,omitempty"`
 	TCPSequence       uint32            `json:"-"` // passive sensor stream preview only
 	PreviewComplete   bool              `json:"-"`
 }

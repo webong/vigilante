@@ -6,8 +6,8 @@ import (
 	"net/http"
 	"testing"
 
-	blockaction "github.com/webong/vigilante/ext/action/block"
 	"github.com/webong/vigilante/internal/action"
+	blockaction "github.com/webong/vigilante/internal/action/block"
 	"github.com/webong/vigilante/internal/block"
 	"github.com/webong/vigilante/internal/decision"
 	"github.com/webong/vigilante/internal/flow"

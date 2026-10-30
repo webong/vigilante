@@ -44,7 +44,7 @@ type Executor interface {
 - `Decision` is the audit record: id, status, revert handle, timestamps.
 - `Result` returns the remote-side handle (`RevertRef`) and a human description.
 
-Executors live in `ext/action/*`, the same place as the obs and agent plugins.
+Executors live in `internal/action/*`, beside the registry that authorizes them; they are Go `action.Executor` implementations, not `ext.plugin/v1` guests.
 
 ### 2. The registry owns the authority
 
@@ -66,14 +66,14 @@ permission.
 
 ### 3. The built-in executor is the reference implementation
 
-`ext/action/block` maps a decision onto `internal/block` and back. It is
+`internal/action/block` maps a decision onto `internal/block` and back. It is
 deliberately thin: dry-run, TTL, audit, and revert all come from the registry.
 That is how we know the contract is sufficient — the one case we already knew
 fits without special cases.
 
 ### 4. Remote actions are template calls, not bespoke integrations
 
-`ext/action/remote` covers any HTTP API with:
+`internal/action/remote` covers any HTTP API with:
 
 - `URL` / `Method` for the create call;
 - `BodyTemplate` for the payload;
@@ -136,8 +136,8 @@ snapshot entry and records that the remote side was not reverted.
 | Contract types | `internal/action/action.go` |
 | Registry, allowlist, TTL, audit, revert | `internal/action/registry.go` |
 | Enforcement snapshot | `internal/decision/decision.go` |
-| Built-in block executor | `ext/action/block/block.go` |
-| Remote/HTTP executor | `ext/action/remote/remote.go` |
+| Built-in block executor | `internal/action/block/block.go` |
+| Remote/HTTP executor | `internal/action/remote/remote.go` |
 | Wiring and flags | `cmd/vigilante/main.go` |
 | Config keys | `cmd/vigilante/config.go`, `deploy/vigilante.yaml.example` |
 | End-to-end test | `internal/gate/chain_test.go` |

@@ -7,4 +7,4 @@ WORKDIR /src
 COPY . .
 RUN go mod download
 ENV VIGILANTE_LINUX_INTEGRATION=1
-CMD ["go","test","-v","./ext/tap","-run","TestLinux"]
+CMD ["go","test","-v","./pkg/tap","-run","TestLinux"]

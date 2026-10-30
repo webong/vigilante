@@ -532,6 +532,14 @@ go build -o vigilante ./cmd/vigilante
 ./vigilante demo -repo ""
 ```
 
+Source layout:
+
+| Tree | Holds |
+| --- | --- |
+| `internal/` | The core: policy, gate, flow, decisions, action registry and executors, TLS fingerprinting, identity, redaction, behavior rules, history. |
+| `pkg/` | Public core packages and ingress integrations meant to be imported (`tap`, `ingress`, `caddy`, `traefik`). |
+| `ext/` | Only `ext.plugin/v1` extensions with a versioned contract: `agent` (`vigilante.agent@v1`), `obs` (`vigilante.obs@v1`) and `triage` (`vigilante.triage@v1`, LLM actor triage). A package belongs here only if it can run as an engine guest; plain separation of concerns goes in `internal/`. |
+
 ```sh
 go test -race -v ./...
 ./scripts/ci-eval.sh        # detector regression gate (same thresholds as CI)

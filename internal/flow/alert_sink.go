@@ -39,10 +39,12 @@ func (s AlertSink) Ingest(_ context.Context, ev Event) error {
 		TargetAddr:     ev.TargetAddr,
 		UserAgent:      ev.UserAgent,
 		TLSFingerprint: ev.TLSFingerprint,
-		Signals:        ev.Signals,
-		Handler:        ev.Handler,
-		Advisories:     ev.Advisories,
-		Findings:       ev.Findings,
+		Protocol:       ev.Protocol, Host: ev.Host, Headers: ev.Headers,
+		Status: ev.Status, Duration: ev.Duration, BytesIn: ev.BytesIn, BytesOut: ev.BytesOut,
+		Signals:    ev.Signals,
+		Handler:    ev.Handler,
+		Advisories: ev.Advisories,
+		Findings:   ev.Findings,
 	})
 	return nil
 }

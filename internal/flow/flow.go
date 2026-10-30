@@ -24,22 +24,30 @@ import (
 // Event is one triaged flow. It carries detection output, not payloads: the
 // preview is already redacted by the tap.
 type Event struct {
-	Timestamp       time.Time       `json:"timestamp"`
-	FlowID          string          `json:"flow_id"`
-	Severity        string          `json:"severity"`
-	Verdict         string          `json:"verdict"`
-	Summary         string          `json:"summary,omitempty"`
-	Method          string          `json:"method,omitempty"`
-	Path            string          `json:"path,omitempty"`
-	SrcAddr         string          `json:"src_addr,omitempty"`
-	TargetAddr      string          `json:"target_addr,omitempty"`
-	UserAgent       string          `json:"user_agent,omitempty"`
-	TLSFingerprint  string          `json:"tls_fingerprint,omitempty"`
-	Handler         string          `json:"matched_handler,omitempty"`
-	Advisories      []string        `json:"matched_advisories,omitempty"`
-	Findings        []alert.Finding `json:"findings,omitempty"`
-	Recommendations []string        `json:"recommendations,omitempty"`
-	Signals         []string        `json:"signals,omitempty"`
+	Timestamp       time.Time         `json:"timestamp"`
+	FlowID          string            `json:"flow_id"`
+	Severity        string            `json:"severity"`
+	Verdict         string            `json:"verdict"`
+	Summary         string            `json:"summary,omitempty"`
+	Method          string            `json:"method,omitempty"`
+	Path            string            `json:"path,omitempty"`
+	SrcAddr         string            `json:"src_addr,omitempty"`
+	TargetAddr      string            `json:"target_addr,omitempty"`
+	UserAgent       string            `json:"user_agent,omitempty"`
+	TLSFingerprint  string            `json:"tls_fingerprint,omitempty"`
+	JA4             string            `json:"ja4,omitempty"`
+	Protocol        string            `json:"protocol,omitempty"`
+	Host            string            `json:"host,omitempty"`
+	Headers         map[string]string `json:"headers,omitempty"`
+	Status          int               `json:"status,omitempty"`
+	Duration        time.Duration     `json:"duration,omitempty"`
+	BytesIn         int64             `json:"bytes_in,omitempty"`
+	BytesOut        int64             `json:"bytes_out,omitempty"`
+	Handler         string            `json:"matched_handler,omitempty"`
+	Advisories      []string          `json:"matched_advisories,omitempty"`
+	Findings        []alert.Finding   `json:"findings,omitempty"`
+	Recommendations []string          `json:"recommendations,omitempty"`
+	Signals         []string          `json:"signals,omitempty"`
 }
 
 // Sink consumes published events. It may block; the publisher isolates that

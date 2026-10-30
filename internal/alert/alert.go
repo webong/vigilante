@@ -61,22 +61,29 @@ type Finding struct {
 }
 
 type Record struct {
-	Timestamp      time.Time `json:"timestamp"`
-	FlowID         string    `json:"flow_id"`
-	Severity       Severity  `json:"severity"`
-	Action         string    `json:"action"`
-	Summary        string    `json:"summary,omitempty"`
-	Method         string    `json:"method,omitempty"`
-	Path           string    `json:"path,omitempty"`
-	SrcAddr        string    `json:"src_addr,omitempty"`
-	TargetAddr     string    `json:"target_addr,omitempty"`
-	UserAgent      string    `json:"user_agent,omitempty"`
-	TLSFingerprint string    `json:"tls_fingerprint,omitempty"`
-	Signals        []string  `json:"signals,omitempty"`
-	Rule           string    `json:"policy_rule,omitempty"` // policy rule that triggered, if any
-	Handler        string    `json:"matched_handler,omitempty"`
-	Advisories     []string  `json:"matched_advisories,omitempty"`
-	Findings       []Finding `json:"findings,omitempty"`
+	Timestamp      time.Time         `json:"timestamp"`
+	FlowID         string            `json:"flow_id"`
+	Severity       Severity          `json:"severity"`
+	Action         string            `json:"action"`
+	Summary        string            `json:"summary,omitempty"`
+	Method         string            `json:"method,omitempty"`
+	Path           string            `json:"path,omitempty"`
+	SrcAddr        string            `json:"src_addr,omitempty"`
+	TargetAddr     string            `json:"target_addr,omitempty"`
+	UserAgent      string            `json:"user_agent,omitempty"`
+	TLSFingerprint string            `json:"tls_fingerprint,omitempty"`
+	Protocol       string            `json:"protocol,omitempty"`
+	Host           string            `json:"host,omitempty"`
+	Headers        map[string]string `json:"headers,omitempty"`
+	Status         int               `json:"status,omitempty"`
+	Duration       time.Duration     `json:"duration,omitempty"`
+	BytesIn        int64             `json:"bytes_in,omitempty"`
+	BytesOut       int64             `json:"bytes_out,omitempty"`
+	Signals        []string          `json:"signals,omitempty"`
+	Rule           string            `json:"policy_rule,omitempty"` // policy rule that triggered, if any
+	Handler        string            `json:"matched_handler,omitempty"`
+	Advisories     []string          `json:"matched_advisories,omitempty"`
+	Findings       []Finding         `json:"findings,omitempty"`
 }
 
 // Reader reads persisted alerts for consumers (dashboards, APIs, exporters).

@@ -15,11 +15,11 @@ import (
 	"github.com/webong/ext/res/system/graph"
 	"github.com/webong/ext/res/system/supervisor"
 	"github.com/webong/vigilante/ext/agent"
-	"github.com/webong/vigilante/ext/tap"
 	"github.com/webong/vigilante/internal/correlator"
 	"github.com/webong/vigilante/internal/deps"
 	"github.com/webong/vigilante/internal/repo"
 	"github.com/webong/vigilante/internal/schema"
+	"github.com/webong/vigilante/pkg/tap"
 )
 
 func TestEndToEndMirrorAndAgentPipeline(t *testing.T) {

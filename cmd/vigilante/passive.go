@@ -10,9 +10,9 @@ import (
 
 	"github.com/webong/vigilante/ext/agent"
 	"github.com/webong/vigilante/ext/obs"
-	"github.com/webong/vigilante/ext/tap"
 	"github.com/webong/vigilante/internal/alert"
 	"github.com/webong/vigilante/internal/correlator"
+	"github.com/webong/vigilante/pkg/tap"
 )
 
 // runPassiveMode starts the AF_PACKET passive sensor: it observes traffic on an

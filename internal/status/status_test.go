@@ -7,7 +7,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/webong/vigilante/ext/tap"
+	"github.com/webong/vigilante/pkg/tap"
 )
 
 func TestHealthzAndMetrics(t *testing.T) {

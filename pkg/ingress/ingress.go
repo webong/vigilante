@@ -18,8 +18,8 @@ import (
 	"time"
 
 	"github.com/webong/vigilante/ext/agent"
-	"github.com/webong/vigilante/ext/tap"
 	"github.com/webong/vigilante/internal/policy"
+	"github.com/webong/vigilante/pkg/tap"
 )
 
 // Action is the enforcement decision returned to an ingress adapter.

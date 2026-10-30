@@ -403,7 +403,9 @@ func (s *Service) renderDashboard() string {
 //	alerts         -> session call obs alerts (?severity=&limit=)
 //	dashboard      -> session call obs dashboard (HTML)
 type Bridge struct {
-	session *engine.Session
+	session   *engine.Session
+	extension Extension
+	next      *Bridge
 }
 
 // NewBridge wraps an engine session running the obs plugin.
@@ -449,6 +451,14 @@ func Open(ctx context.Context, svc *Service) (*engine.Session, *Bridge, func(con
 
 // ServeHTTP routes to the appropriate plugin operation.
 func (b *Bridge) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	if b.extension.History != nil && strings.HasPrefix(r.URL.Path, "/history/") {
+		b.extension.ServeHTTP(w, r)
+		return
+	}
+	if b.next != nil {
+		b.next.ServeHTTP(w, r)
+		return
+	}
 	ctx := r.Context()
 	path := strings.Trim(strings.TrimPrefix(r.URL.Path, "/"), "/")
 	switch {

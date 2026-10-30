@@ -10,8 +10,8 @@ import (
 	"net"
 	"net/http"
 
-	"github.com/webong/vigilante/ext/tap"
 	"github.com/webong/vigilante/internal/decision"
+	"github.com/webong/vigilante/pkg/tap"
 )
 
 // Options configures the composed gate. All fields are optional.
@@ -25,6 +25,9 @@ type Options struct {
 	// Fingerprint derives a fingerprint key (TLS/JA3) from the request. The
 	// default has no fingerprint source and returns "".
 	Fingerprint func(*http.Request) string
+	// Responses lists action ids handled by an enabled response extension.
+	// Unhandled richer decisions fail closed.
+	Responses map[string]bool
 	// OnHit observes each snapshot hit (metrics, audit).
 	OnHit func(decision.Entry)
 }
@@ -65,10 +68,13 @@ func New(opts Options) tap.PolicyGate {
 		switch entry.Action {
 		case "deny", "block":
 			return entry.Action
+		case "challenge", "rate_limit":
+			if opts.Responses[entry.Action] {
+				return entry.Action
+			}
+			return "block"
 		default:
-			// The tap only understands allow/deny/block. Anything else (for
-			// example a challenge the ingress cannot serve) fails closed: a
-			// decision is in force, so do not forward.
+			// Unknown actions fail closed when no response extension handles them.
 			return "block"
 		}
 	}

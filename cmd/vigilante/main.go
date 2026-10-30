@@ -29,26 +29,32 @@ import (
 	"github.com/webong/ext/res/system"
 	"github.com/webong/ext/res/system/graph"
 	"github.com/webong/ext/res/system/supervisor"
-	blockaction "github.com/webong/vigilante/ext/action/block"
-	"github.com/webong/vigilante/ext/action/remote"
 	"github.com/webong/vigilante/ext/agent"
 	"github.com/webong/vigilante/ext/obs"
-	"github.com/webong/vigilante/ext/tap"
+	"github.com/webong/vigilante/ext/triage"
 	"github.com/webong/vigilante/internal/action"
+	blockaction "github.com/webong/vigilante/internal/action/block"
+	"github.com/webong/vigilante/internal/action/remote"
+	responseaction "github.com/webong/vigilante/internal/action/response"
 	"github.com/webong/vigilante/internal/actor"
 	"github.com/webong/vigilante/internal/alert"
+	"github.com/webong/vigilante/internal/behavior"
 	"github.com/webong/vigilante/internal/block"
 	"github.com/webong/vigilante/internal/correlator"
 	"github.com/webong/vigilante/internal/decision"
 	"github.com/webong/vigilante/internal/deps"
+	"github.com/webong/vigilante/internal/egress"
 	"github.com/webong/vigilante/internal/flow"
 	policygate "github.com/webong/vigilante/internal/gate"
 	"github.com/webong/vigilante/internal/gateway"
+	"github.com/webong/vigilante/internal/history"
 	"github.com/webong/vigilante/internal/policy"
 	"github.com/webong/vigilante/internal/repo"
+	httpResponse "github.com/webong/vigilante/internal/response"
 	"github.com/webong/vigilante/internal/schema"
 	"github.com/webong/vigilante/internal/status"
 	"github.com/webong/vigilante/pkg/ingress"
+	"github.com/webong/vigilante/pkg/tap"
 )
 
 func main() {
@@ -133,6 +139,23 @@ func run(args []string, out io.Writer) error {
 	agentTimeout := fs.Duration("agent-timeout", 30*time.Second, "Per-triage timeout for CLI or remote agent")
 	agentIPC := fs.String("agent-ipc", "", "Internal IPC address when running in -mode agent-worker")
 	var configPaths stringListFlag
+	historyFile := fs.String("history-file", "", "SQLite evidence store for flows, actors, review and egress")
+	historyRetention := fs.Duration("history-retention", 7*24*time.Hour, "How long retained evidence is kept")
+	behaviorEnabled := fs.Bool("behavior", false, "Enable asynchronous behavioral actor analysis")
+	identityVerify := fs.Bool("identity-verify", false, "Verify crawler DNS and Web Bot Auth identities")
+	behaviorMinScore := fs.Int("behavior-min-score", 80, "Minimum behavior score for a review suggestion")
+	triageEnabled := fs.Bool("triage", false, "Send interesting actors to an LLM for classification before suggesting enforcement")
+	triageProvider := fs.String("triage-provider", "openrouter", "LLM provider: openrouter or anthropic")
+	triageAPIKey := fs.String("triage-api-key", "", "LLM API key (env VIGILANTE_TRIAGE_API_KEY)")
+	triageModel := fs.String("triage-model", "", "LLM model (provider default if unset)")
+	triageMinScore := fs.Int("triage-min-score", 25, "Minimum behavior score that sends an actor to LLM triage")
+	triageEffort := fs.String("triage-effort", "", "Reasoning effort: low, medium or high")
+	egressEnabled := fs.Bool("egress", false, "Observe outbound TCP connections with Linux eBPF")
+	obsToken := fs.String("obs-token", "", "Bearer token for authenticated history and review APIs")
+	httpChallenge := fs.Bool("http-challenge", false, "Enable proof-of-work challenge responses")
+	httpRateLimit := fs.Bool("http-rate-limit", false, "Enable in-process rate-limit responses")
+	httpRateRPM := fs.Int("http-rate-rpm", 60, "Requests per minute for in-process rate limiting")
+	trustProxy := fs.String("trust-proxy", "", "Comma-separated proxy CIDRs trusted to supply X-Forwarded-For")
 	fs.Var(&configPaths, "config", "Config file (YAML or JSON); repeat in order, later files override earlier files; CLI flags win")
 
 	if err := fs.Parse(args); err != nil {
@@ -245,6 +268,40 @@ func run(args []string, out io.Writer) error {
 	applyDur(set["action-ttl"], actionTTL, cfg.ActionTTL)
 	applyDur(set["action-max-ttl"], actionMaxTTL, cfg.ActionMaxTTL)
 	applyDur(set["actor-window"], actorWindow, cfg.ActorWindow)
+	applyStr(set["history-file"], historyFile, cfg.HistoryFile)
+	applyDur(set["history-retention"], historyRetention, cfg.HistoryRetention)
+	applyBool(set["behavior"], behaviorEnabled, cfg.Behavior)
+	applyBool(set["identity-verify"], identityVerify, cfg.IdentityVerify)
+	applyInt(set["behavior-min-score"], behaviorMinScore, cfg.BehaviorMinScore)
+	applyBool(set["triage"], triageEnabled, cfg.Triage)
+	applyStr(set["triage-provider"], triageProvider, cfg.TriageProvider)
+	applyStr(set["triage-api-key"], triageAPIKey, cfg.TriageAPIKey)
+	applyStr(set["triage-model"], triageModel, cfg.TriageModel)
+	applyInt(set["triage-min-score"], triageMinScore, cfg.TriageMinScore)
+	applyStr(set["triage-effort"], triageEffort, cfg.TriageEffort)
+	applyBool(set["egress"], egressEnabled, cfg.Egress)
+	applyStr(set["obs-token"], obsToken, cfg.ObsToken)
+	applyBool(set["http-challenge"], httpChallenge, cfg.HTTPChallenge)
+	applyBool(set["http-rate-limit"], httpRateLimit, cfg.HTTPRateLimit)
+	applyInt(set["http-rate-rpm"], httpRateRPM, cfg.HTTPRateRPM)
+	applyStr(set["trust-proxy"], trustProxy, cfg.TrustProxy)
+	if *obsToken == "" {
+		*obsToken = os.Getenv("VIGILANTE_OBS_TOKEN")
+	}
+	if *triageAPIKey == "" {
+		*triageAPIKey = os.Getenv("VIGILANTE_TRIAGE_API_KEY")
+	}
+	trustedProxies, err := parseTrustedProxies(*trustProxy)
+	if err != nil {
+		return err
+	}
+	var responseHandler httpResponse.Handler
+	if *httpChallenge {
+		responseHandler.Challenge = httpResponse.NewChallenger()
+	}
+	if *httpRateLimit {
+		responseHandler.Limits = httpResponse.NewLimiter(*httpRateRPM)
+	}
 	if !set["sample-rate"] && cfg.SampleRate > 0 {
 		*sampleRate = cfg.SampleRate
 	}
@@ -260,6 +317,7 @@ func run(args []string, out io.Writer) error {
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
+	ctx = withResponseRuntime(ctx, responseHandler)
 	decoderEnabled := *decodeTLS || *tlsKeyLog != "" || *captureFile != "" || *decoderCommand != "" || *tlsKeyCredential != ""
 	if decoderEnabled && *mode != "passive" && *mode != "inline" {
 		return fmt.Errorf("decoder options require passive or inline mode")
@@ -412,7 +470,15 @@ func run(args []string, out io.Writer) error {
 	}
 	// Static policy first, then the live snapshot. The snapshot can only make
 	// the outcome stricter, never loosen a configured rule.
-	polGate = policygate.New(policygate.Options{Policy: polGate, Set: decisions})
+	polGate = policygate.New(policygate.Options{Policy: polGate, Set: decisions, Responses: map[string]bool{"challenge": *httpChallenge, "rate_limit": *httpRateLimit}})
+	baseGate := polGate
+	polGate = func(r *http.Request) string {
+		if r.URL.Path == httpResponse.ChallengePath {
+			return "allow"
+		}
+		r = trustedRequest(r, trustedProxies)
+		return baseGate(r)
+	}
 	{
 		var err error
 		enforcer, err = block.New(block.Options{
@@ -466,6 +532,13 @@ func run(args []string, out io.Writer) error {
 			return err
 		}
 	}
+	for _, kind := range []string{"challenge", "rate_limit"} {
+		if (kind == "challenge" && *httpChallenge) || (kind == "rate_limit" && *httpRateLimit) {
+			if err := registry.Register(responseaction.New(kind)); err != nil {
+				return err
+			}
+		}
+	}
 	if *actionWebhook != "" {
 		headers := map[string]string{}
 		if *actionWebhookToken != "" {
@@ -504,6 +577,26 @@ func run(args []string, out io.Writer) error {
 	fmt.Fprintf(out, "[vigilante] actions: allow=%v dry-run=%v ttl=%s max=%s capabilities=[%s]\n",
 		splitCSV(*actionAllow), *actionDryRun, *actionTTL, *actionMaxTTL, strings.Join(caps, ", "))
 
+	var historyStore *history.Store
+	if *historyFile != "" {
+		var err error
+		historyStore, err = history.Open(*historyFile)
+		if err != nil {
+			return err
+		}
+		defer historyStore.Close()
+		if *egressEnabled {
+			go func() {
+				if err := egress.Run(ctx, egress.Options{}, func(ev history.Egress) { _ = historyStore.RecordEgress(context.Background(), ev) }); err != nil && ctx.Err() == nil {
+					fmt.Fprintln(out, "[vigilante] egress extension:", err)
+				}
+			}()
+		}
+		go runHistoryMaintenance(ctx, historyStore, *historyRetention)
+		fmt.Fprintf(out, "[vigilante] history store active: %s\n", *historyFile)
+	} else if *behaviorEnabled || *egressEnabled {
+		return fmt.Errorf("history-file is required for behavior and egress extensions")
+	}
 	var alertStore *alert.Store
 	if *alertFile != "" || *alertDeliver != "" {
 		path := *alertFile
@@ -543,6 +636,36 @@ func run(args []string, out io.Writer) error {
 	var obsBridge *obs.Bridge
 	var obsClose func(context.Context) error
 	var obsMetrics func(http.ResponseWriter)
+
+	// Actor triage is the vigilante.triage@v1 plugin, shared between the
+	// behavior sink and the dashboard API. Left as a nil interface when off.
+	var triager triage.Service
+	if historyStore != nil && *triageEnabled && *triageAPIKey != "" {
+		var p triage.Provider
+		model := *triageModel
+		switch *triageProvider {
+		case "anthropic":
+			if model == "" {
+				model = "claude-opus-5-5"
+			}
+			p = triage.NewAnthropic(*triageAPIKey, model, *triageEffort)
+		default:
+			if model == "" {
+				model = "deepseek/deepseek-v4.1-flash"
+			}
+			p = triage.NewOpenRouter("https://openrouter.ai/api/v1", *triageAPIKey, model, *triageEffort)
+		}
+		client, terr := triage.Open(ctx, triage.New(p, model))
+		if terr != nil {
+			return fmt.Errorf("open triage plugin: %w", terr)
+		}
+		defer func() { _ = client.Close(context.Background()) }()
+		triager = client
+		fmt.Fprintf(out, "[vigilante] triage plugin active: %s (ext.plugin/v1 vigilante.triage@v1)\n", model)
+	} else if historyStore != nil && *triageEnabled {
+		fmt.Fprintln(out, "[vigilante] triage enabled but no API key set (VIGILANTE_TRIAGE_API_KEY); running rules only")
+	}
+
 	if alertStore != nil && *obsEnabled {
 		obsSvc := obs.NewService(
 			alertStore,
@@ -571,17 +694,32 @@ func run(args []string, out io.Writer) error {
 		}
 		fmt.Fprintln(out, "[vigilante] obs plugin active: /obs/dashboard, /obs/alerts, /obs/summary, /obs/actions, /obs/actors (ext.plugin/v1 vigilante.obs@v1)")
 	}
+	// History, review and the web dashboard wrap the obs bridge rather than
+	// replace it, so both route sets stay mounted.
+	if historyStore != nil && *obsEnabled {
+		obsBridge = obs.NewExtensionBridge(obs.Extension{History: historyStore, Actions: registry, Token: *obsToken, Triager: triager}, obsBridge)
+	}
 
 	// Flow publication: the stateless core hands each triaged flow to a bounded
 	// fan-out. Sinks never backpressure live traffic; a full queue drops and
 	// counts. The alert store is the baseline sink; the actor index is the
 	// stateful aggregation sink; a custom console is another Sink.
 	var publisher *flow.Publisher
+	var sinks []flow.Sink
 	if alertStore != nil {
-		publisher = flow.NewPublisher([]flow.Sink{
-			flow.AlertSink{Store: alertStore},
-			actorIdx,
-		}, *queueSize, 2)
+		sinks = append(sinks, flow.AlertSink{Store: alertStore}, actorIdx)
+	}
+	if historyStore != nil {
+		if *behaviorEnabled {
+			bs := behavior.Sink{Store: historyStore, Verifier: optionalVerifier(*identityVerify), MinScore: *behaviorMinScore, Triager: triager, TriageMinScore: *triageMinScore}
+			bs.EnsureTriaged()
+			sinks = append(sinks, bs)
+		} else {
+			sinks = append(sinks, historyStore)
+		}
+	}
+	if len(sinks) > 0 {
+		publisher = flow.NewPublisher(sinks, *queueSize, 2)
 		defer func() {
 			cctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 			defer cancel()
@@ -589,7 +727,7 @@ func run(args []string, out io.Writer) error {
 				fmt.Fprintln(out, "[vigilante] flow publisher:", err)
 			}
 		}()
-		fmt.Fprintln(out, "[vigilante] flow publisher active (sinks: alert store, actor index)")
+		fmt.Fprintf(out, "[vigilante] flow publisher active (%d extension sinks)\n", len(sinks))
 	}
 
 	var gw *agent.Gateway
@@ -685,6 +823,14 @@ func run(args []string, out io.Writer) error {
 					TargetAddr:      env.Event.TargetAddr,
 					UserAgent:       headerValue(env.Event.Headers, "User-Agent"),
 					TLSFingerprint:  env.Event.TLSFingerprint,
+					JA4:             env.Event.JA4,
+					Protocol:        env.Event.Protocol,
+					Host:            env.Event.Host,
+					Headers:         env.Event.Headers,
+					Status:          env.Event.Status,
+					Duration:        env.Event.Duration,
+					BytesIn:         env.Event.BytesIn,
+					BytesOut:        env.Event.BytesOut,
 					Handler:         v.MatchedHandler,
 					Advisories:      v.MatchedAdvisories,
 					Findings:        findings,
@@ -898,7 +1044,7 @@ func runMiddlewareMode(ctx context.Context, out io.Writer, corr *correlator.Corr
 	queue.SetFingerprints(fps)
 
 	handler := withStatus(
-		tap.HTTPMiddlewareGate(httputil.NewSingleHostReverseProxy(targetURL), queue, listenAddr, targetURL.Host, gate),
+		tap.HTTPMiddlewareGate(responseFromContext(ctx).Wrap(httputil.NewSingleHostReverseProxy(targetURL), httpGate{gate}), queue, listenAddr, targetURL.Host, gate),
 		queue, alertStatsOf(alertStore), obsB, obsM)
 	srv := &http.Server{Addr: listenAddr, Handler: handler}
 	if tlsCert != "" && tlsKey != "" {
@@ -1347,7 +1493,7 @@ func runHTTPProxy(ctx context.Context, out io.Writer, corr *correlator.Correlato
 	srv := &http.Server{
 		Addr: listenAddr,
 		Handler: withStatus(
-			tap.HTTPMiddlewareGate(tap.NewHTTPReverseProxyTap(targetURL, queue, listenAddr), queue, listenAddr, targetURL.Host, gate),
+			tap.HTTPMiddlewareGate(responseFromContext(ctx).Wrap(tap.NewHTTPReverseProxyTap(targetURL, queue, listenAddr), httpGate{gate}), queue, listenAddr, targetURL.Host, gate),
 			queue, alertStatsOf(alertStore), obsB, obsM),
 	}
 	if tlsCert != "" && tlsKey != "" {

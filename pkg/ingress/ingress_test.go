@@ -10,8 +10,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/webong/vigilante/ext/tap"
 	"github.com/webong/vigilante/internal/policy"
+	"github.com/webong/vigilante/pkg/tap"
 )
 
 func testPolicy(t *testing.T) *policy.Engine {

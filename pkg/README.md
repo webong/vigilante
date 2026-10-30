@@ -9,6 +9,7 @@ proxy you already operate. The `pkg/` tree holds those integrations.
 | [`caddy/`](caddy) | Caddy | native Go module (`http.handlers.vigilante`) | in-process policy, optional sidecar mirror |
 | [`traefik/`](traefik) | Traefik | Yaegi middleware plugin | sidecar `POST /v1/decide` |
 | [`nginx/`](nginx) | nginx | `auth_request` + `mirror`, or an njs handler | sidecar `POST /v1/check` and `/v1/observe` |
+| [`tap/`](tap) | your Go service | embeddable capture (mirror, TCP tee, passive, inline) | in-process |
 
 Nothing here changes your proxy's forwarding path on its own: you opt in with a
 middleware/handler, and the decision is always **allow by default** unless a

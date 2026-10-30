@@ -72,6 +72,23 @@ type Config struct {
 	SidecarCacheTTL    time.Duration `yaml:"sidecar_cache_ttl" json:"sidecar_cache_ttl"`
 	SidecarCacheTTLSet bool          `yaml:"-" json:"-"`
 	Target             string        `yaml:"target" json:"target"`
+	HistoryFile        string        `yaml:"history_file" json:"history_file"`
+	HistoryRetention   time.Duration `yaml:"history_retention" json:"history_retention"`
+	Behavior           *bool         `yaml:"behavior" json:"behavior"`
+	IdentityVerify     *bool         `yaml:"identity_verify" json:"identity_verify"`
+	BehaviorMinScore   int           `yaml:"behavior_min_score" json:"behavior_min_score"`
+	Triage             *bool         `yaml:"triage" json:"triage"`
+	TriageProvider     string        `yaml:"triage_provider" json:"triage_provider"`
+	TriageAPIKey       string        `yaml:"triage_api_key" json:"triage_api_key"`
+	TriageModel        string        `yaml:"triage_model" json:"triage_model"`
+	TriageMinScore     int           `yaml:"triage_min_score" json:"triage_min_score"`
+	TriageEffort       string        `yaml:"triage_effort" json:"triage_effort"`
+	Egress             *bool         `yaml:"egress" json:"egress"`
+	ObsToken           string        `yaml:"obs_token" json:"obs_token"`
+	HTTPChallenge      *bool         `yaml:"http_challenge" json:"http_challenge"`
+	HTTPRateLimit      *bool         `yaml:"http_rate_limit" json:"http_rate_limit"`
+	HTTPRateRPM        int           `yaml:"http_rate_rpm" json:"http_rate_rpm"`
+	TrustProxy         string        `yaml:"trust_proxy" json:"trust_proxy"`
 
 	Repo       string `yaml:"repo" json:"repo"`
 	RepoRef    string `yaml:"repo_ref" json:"repo_ref"`

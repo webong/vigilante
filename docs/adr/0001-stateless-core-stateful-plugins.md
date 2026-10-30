@@ -1,6 +1,6 @@
 # ADR 0001 — Keep the core stateless; publish flows to plugins
 
-- Status: Accepted
+- Status: Accepted, amended 2026-10-30 (see [Amendment](#amendment-2026-10-30-off-path-state-is-core))
 - Date: 2026-10-28
 - Deciders: Vigilante maintainers
 - Related: [ADR 0002](0002-open-ended-action-contract.md)
@@ -118,7 +118,8 @@ snapshot. See [ADR 0002](0002-open-ended-action-contract.md).
   bound the divergence window; the firewall remains the authoritative control for
   `block`.
 - **Temptation to add "just one" piece of state.** This is the real risk.
-  Reviewers should reject core changes that persist per-actor state.
+  Reviewers should reject core changes that put per-actor state on the request
+  path. State behind a `flow.Sink` is allowed; see the amendment.
 
 ## Alternatives considered
 
@@ -140,7 +141,35 @@ snapshot. See [ADR 0002](0002-open-ended-action-contract.md).
 | TTL snapshot | `internal/decision/decision.go` |
 | Policy + snapshot composition | `internal/gate/gate.go` |
 | Action authority | `internal/action/registry.go` |
+| Durable flow/actor history (off-path sink) | `internal/history`, `internal/behavior` |
+| LLM actor triage plugin | `ext/triage` (`vigilante.triage@v1`) |
 | Wiring | `cmd/vigilante/main.go` |
+
+## Amendment 2026-10-30: off-path state is core
+
+The original decision equated "stateful" with "plugin". In practice the risk
+this ADR guards against is state **on the request path**, not state as such.
+The amendment narrows the rule:
+
+- **The request path stays stateless.** Capture, enrichment, policy and the gate
+  read only the in-memory decision snapshot. Unchanged.
+- **Durable state behind a `flow.Sink` is core.** `internal/history` (SQLite
+  flow and actor store), `internal/behavior` (deterministic rules over that
+  history, suggesting decisions), and `internal/actor` run on the publisher's
+  bounded queue. They can be slow or fail without touching traffic: a full queue
+  drops and counts, exactly as before.
+- **"Plugin" means an `ext.plugin/v1` guest, not "separate package".** Code goes
+  in `ext/` only when it sits behind a versioned contract and an
+  `engine.Session`, so it can be replaced or run out of process without a core
+  release. Today that is `vigilante.agent@v1` (flow triage),
+  `vigilante.obs@v1` (data API and dashboard), and `vigilante.triage@v1`
+  (LLM actor triage). Packages split out only for separation of concerns belong
+  in `internal/` (or `pkg/` when meant to be imported).
+
+A component is a plugin when it is swappable by nature: it calls a model or
+vendor, its output is non-deterministic, or operators are expected to bring
+their own. Deterministic rules, stores, fingerprinting, redaction and the
+built-in action executors are core.
 
 ## Non-goals
 
