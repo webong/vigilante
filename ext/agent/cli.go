@@ -41,6 +41,15 @@ type CLIOptions struct {
 	OnError func(error)
 }
 
+// NewCLIProbeHandler invokes an external command without the production
+// built-in fallback. It is intended for connectivity checks, where a fallback
+// verdict would hide a broken agent configuration.
+func NewCLIProbeHandler(opts CLIOptions) Handler {
+	return func(ctx context.Context, env EnrichedEnvelope) (Verdict, error) {
+		return cliTriage(ctx, opts, env)
+	}
+}
+
 // NewCLIHandler returns a Handler that triages by invoking an external command.
 // It falls back to DefaultBuiltInHandler if the command fails, so a broken CLI
 // never silences triage.

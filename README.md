@@ -271,18 +271,28 @@ For a local command-line agent, such as OpenCode:
 
 ```yaml
 # agent.yaml
-agent: cli
-agent_command: opencode
-agent_args:
-  - run
-  - '{prompt}'
+agent: opencode
 agent_dir: /srv/my-app
 agent_timeout: 2m
 ```
 
 Install and authenticate the agent separately. It must run without interactive
-prompts. Configure its model, skills, tools, and output destinations in the agent
-itself. Other command-line agents can use the same configurable command and arguments.
+prompts. The `opencode`, `claude`, and `codex` presets supply their standard
+non-interactive invocation and send the prompt plus envelope on stdin. Override
+`agent_command`, `agent_args`, or `agent_input` when needed; other command-line
+agents can use `agent: cli` with the same configurable settings.
+
+Test local or cloud connectivity without starting a listener:
+
+```sh
+vigilante -mode agent-test -agent opencode
+vigilante -mode agent-test -agent claude
+vigilante -mode agent-test -agent remote:https://agent.example.com/v1/triage
+```
+
+This sends a synthetic flow and prints the verdict or acknowledgement. Unlike
+live CLI triage, a failed test does not fall back to built-in detection, so it
+exits nonzero and exposes configuration or connectivity errors.
 
 For an agent service on another machine or in the cloud:
 

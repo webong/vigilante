@@ -5,18 +5,21 @@
 # This replaces a long command line: everything you'd pass on the CLI can be
 # set here instead.
 
-# demo | http | tcp | middleware | gateway | passive | sidecar | eval | agent-worker
+# demo | http | tcp | middleware | gateway | passive | sidecar | eval | agent-test | agent-worker
 mode: http
 
-# Agent backend: builtin | cli | cli:<executable> | remote:<https-url> | supervised
+# Agent backend: builtin | opencode | claude | codex | cli | cli:<executable> | remote:<https-url> | supervised
 agent: builtin
 agent_timeout: 30s
-# For a local CLI agent, use agent: cli and configure argv separately:
-# agent_command: opencode
-# agent_args:
-#   - run
-#   - '{prompt}'
-# agent_input: json  # or prompt for CLIs that read the whole prompt on stdin
+# Named local presets run `opencode run -`, `claude -p`, or `codex exec -`
+# with the triage prompt and enriched envelope on stdin. Override their
+# executable with agent_command and argv with agent_args when needed.
+# agent_dir: /srv/my-service
+# agent_input: prompt  # or json to send only the envelope JSON
+# For a cloud agent, use agent: remote:https://agent.example.com/v1/triage
+# and set VIGILANTE_AGENT_TOKEN in the environment when authentication is needed.
+# Test either backend without starting a listener:
+#   vigilante -mode agent-test -agent opencode
 
 # Gateway posture (mode: gateway): local | external:<url>
 gateway: local

@@ -63,7 +63,7 @@ func run(args []string, out io.Writer) error {
 	fs := flag.NewFlagSet("vigilante", flag.ContinueOnError)
 	fs.SetOutput(out)
 
-	mode := fs.String("mode", "demo", "Placement: passive, reverse, middle, inline; utilities: demo, eval; legacy modes remain supported")
+	mode := fs.String("mode", "demo", "Placement: passive, reverse, middle, inline; utilities: demo, eval, agent-test; legacy modes remain supported")
 	protocol := fs.String("protocol", "http", "Protocol for reverse mode: http or tcp")
 	decoderCommand := fs.String("decoder-command", "", "Local decoder executable emitting PacketEvent JSONL")
 	var decoderArgs stringListFlag
@@ -124,10 +124,10 @@ func run(args []string, out io.Writer) error {
 	graphFile := fs.String("graph-file", "", "Optional path to persist the ext + vigilante graph JSON store")
 	queueSize := fs.Int("queue-size", 256, "Bounded packet mirror ring-buffer capacity")
 	supervisedAgent := fs.Bool("supervised-agent", false, "Launch agent out-of-process via ext/res/system/supervisor + jsonline IPC (equivalent to -agent supervised)")
-	agentKind := fs.String("agent", "", "Agent kind: builtin, cli:<command>, remote:<https-url>, or supervised")
-	agentCommand := fs.String("agent-command", "", "Executable for -agent cli (argv is configured separately)")
+	agentKind := fs.String("agent", "", "Agent kind: opencode, claude, codex, builtin, cli:<command>, remote:<https-url>, or supervised")
+	agentCommand := fs.String("agent-command", "", "Executable for -agent cli or to override a named preset")
 	agentDir := fs.String("agent-dir", "", "Working directory for CLI agent skills and configuration")
-	agentInput := fs.String("agent-input", "json", "CLI stdin format: json or prompt")
+	agentInput := fs.String("agent-input", "", "CLI stdin format: json or prompt (presets default to prompt)")
 	var agentArgs stringListFlag
 	fs.Var(&agentArgs, "agent-arg", "CLI argument; repeat for each argv element; {prompt} inserts triage instructions")
 	agentTimeout := fs.Duration("agent-timeout", 30*time.Second, "Per-triage timeout for CLI or remote agent")
@@ -283,6 +283,12 @@ func run(args []string, out io.Writer) error {
 
 	if *mode == "eval" {
 		return runEval(ctx, out, *evalCorpus, *evalJSON, *evalMinRecall, *evalMaxFPR)
+	}
+	if *mode == "agent-test" {
+		return runAgentTest(ctx, out, agentDispatchOptions{
+			Kind: *agentKind, Command: *agentCommand, Args: []string(agentArgs),
+			Input: *agentInput, Dir: *agentDir, Timeout: *agentTimeout,
+		})
 	}
 
 	if *mode == "agent-worker" {
@@ -589,7 +595,7 @@ func run(args []string, out io.Writer) error {
 	var gw *agent.Gateway
 	// Resolve the agent kind: explicit -agent wins; -supervised-agent maps to
 	// "supervised"; empty means builtin.
-	kind, cliCmd := splitAgentArg(*agentKind)
+	kind, cliCmd := resolveAgentPreset(*agentKind, *agentCommand, (*[]string)(&agentArgs), agentInput)
 	if kind == "" && *supervisedAgent {
 		kind = "supervised"
 	}
@@ -638,6 +644,9 @@ func run(args []string, out io.Writer) error {
 		fmt.Fprintf(out, "[vigilante] remote agent: %s (timeout %s)\n", cliCmd, *agentTimeout)
 		gw, err = agent.NewInProcessGateway(ctx, store, repoIdx, remoteHandler)
 	case "", "builtin":
+		if *agentInput != "json" && *agentInput != "prompt" {
+			return fmt.Errorf("-agent-input must be json or prompt")
+		}
 		gw, err = agent.NewInProcessGateway(ctx, store, repoIdx, nil)
 	default:
 		return fmt.Errorf("unknown agent kind %q", kind)
@@ -775,7 +784,7 @@ func run(args []string, out io.Writer) error {
 		}
 		return runPassiveMode(ctx, out, corr, *passiveIface, *passivePorts, *queueSize, *sampleRate, alertStore, obsBridge, obsMetrics)
 	default:
-		return fmt.Errorf("unsupported mode %q (choose demo, http, tcp, middleware, gateway, passive, sidecar, eval, or agent-worker)", *mode)
+		return fmt.Errorf("unsupported mode %q (choose demo, http, tcp, middleware, gateway, passive, sidecar, eval, agent-test, or agent-worker)", *mode)
 	}
 }
 

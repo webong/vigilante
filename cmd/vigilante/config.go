@@ -48,9 +48,9 @@ type Config struct {
 	DecodeTLS           *bool    `yaml:"decode_tls" json:"decode_tls"`
 	Protocol            string   `yaml:"protocol" json:"protocol"`
 	Transports          string   `yaml:"transports" json:"transports"`
-	// Mode: demo | http | tcp | middleware | gateway | passive | sidecar | agent-worker
+	// Mode: demo | http | tcp | middleware | gateway | passive | sidecar | agent-test | agent-worker
 	Mode string `yaml:"mode" json:"mode"`
-	// Agent: builtin | cli:<cmd> | remote:<https-url> | supervised
+	// Agent: builtin | opencode | claude | codex | cli:<cmd> | remote:<https-url> | supervised
 	Agent        string   `yaml:"agent" json:"agent"`
 	AgentCommand string   `yaml:"agent_command" json:"agent_command"`
 	AgentArgs    []string `yaml:"agent_args" json:"agent_args"`
