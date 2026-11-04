@@ -170,25 +170,25 @@ async function request<T>(method: string, path: string, body?: unknown): Promise
 }
 
 export const api = {
-  session: () => request<{ authenticated: boolean }>("GET", "/obs/api/session"),
-  login: (token: string) => request<{ authenticated: boolean }>("POST", "/obs/api/login", { token }),
-  logout: () => request<{ authenticated: boolean }>("POST", "/obs/api/logout", {}),
+  session: () => request<{ authenticated: boolean }>("GET", "/lookout/api/session"),
+  login: (token: string) => request<{ authenticated: boolean }>("POST", "/lookout/api/login", { token }),
+  logout: () => request<{ authenticated: boolean }>("POST", "/lookout/api/logout", {}),
 
-  overview: () => request<Overview>("GET", "/obs/api/overview"),
-  actors: (filter: ActorFilter) => request<Actor[]>("GET", `/obs/api/actors?filter=${filter}`),
-  actor: (id: number) => request<ActorDetail>("GET", `/obs/api/actors/${id}`),
-  triage: (id: number) => request<Verdict>("POST", `/obs/api/actors/${id}/triage`, {}),
+  overview: () => request<Overview>("GET", "/lookout/api/overview"),
+  actors: (filter: ActorFilter) => request<Actor[]>("GET", `/lookout/api/actors?filter=${filter}`),
+  actor: (id: number) => request<ActorDetail>("GET", `/lookout/api/actors/${id}`),
+  triage: (id: number) => request<Verdict>("POST", `/lookout/api/actors/${id}/triage`, {}),
   dismiss: (id: number, dismissed: boolean) =>
-    request<{ dismissed: boolean }>("POST", `/obs/api/actors/${id}/dismiss`, { dismissed }),
+    request<{ dismissed: boolean }>("POST", `/lookout/api/actors/${id}/dismiss`, { dismissed }),
 
-  decisions: () => request<Decision[]>("GET", "/obs/api/decisions"),
-  createDecision: (d: NewDecision) => request<Decision>("POST", "/obs/api/decisions", d),
+  decisions: () => request<Decision[]>("GET", "/lookout/api/decisions"),
+  createDecision: (d: NewDecision) => request<Decision>("POST", "/lookout/api/decisions", d),
   transition: (id: number, verb: "approve" | "reject" | "revoke") =>
-    request<Decision>("POST", `/obs/api/decisions/${id}/${verb}`, {}),
+    request<Decision>("POST", `/lookout/api/decisions/${id}/${verb}`, {}),
 
-  egress: () => request<EgressDest[]>("GET", "/obs/api/egress"),
+  egress: () => request<EgressDest[]>("GET", "/lookout/api/egress"),
 
-  sensors: () => request<Sensor[]>("GET", "/obs/api/sensors"),
-  createSensor: (name: string) => request<{ sensor: Sensor; key: string }>("POST", "/obs/api/sensors", { name }),
-  deleteSensor: (id: number) => request<void>("DELETE", `/obs/api/sensors/${id}`),
+  sensors: () => request<Sensor[]>("GET", "/lookout/api/sensors"),
+  createSensor: (name: string) => request<{ sensor: Sensor; key: string }>("POST", "/lookout/api/sensors", { name }),
+  deleteSensor: (id: number) => request<void>("DELETE", `/lookout/api/sensors/${id}`),
 }

@@ -525,3 +525,23 @@ func TestIsLoopbackListen(t *testing.T) {
 		}
 	}
 }
+
+func TestLookoutConfigKeys(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "lookout.yaml")
+	data := "mode: http\n" +
+		"lookout: true\n" +
+		"lookout_token: lk_secret_token\n"
+	if err := os.WriteFile(path, []byte(data), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := loadConfig(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Lookout == nil || !*cfg.Lookout {
+		t.Errorf("lookout = %v, want true", cfg.Lookout)
+	}
+	if cfg.LookoutToken != "lk_secret_token" {
+		t.Errorf("lookout_token = %q, want lk_secret_token", cfg.LookoutToken)
+	}
+}

@@ -85,6 +85,7 @@ type Config struct {
 	TriageEffort       string        `yaml:"triage_effort" json:"triage_effort"`
 	Egress             *bool         `yaml:"egress" json:"egress"`
 	ObsToken           string        `yaml:"obs_token" json:"obs_token"`
+	LookoutToken       string        `yaml:"lookout_token" json:"lookout_token"`
 	HTTPChallenge      *bool         `yaml:"http_challenge" json:"http_challenge"`
 	HTTPRateLimit      *bool         `yaml:"http_rate_limit" json:"http_rate_limit"`
 	HTTPRateRPM        int           `yaml:"http_rate_rpm" json:"http_rate_rpm"`
@@ -155,6 +156,7 @@ type Config struct {
 	SampleRate   float64       `yaml:"sample_rate" json:"sample_rate"`
 	AgentTimeout time.Duration `yaml:"agent_timeout" json:"agent_timeout"`
 	Obs          *bool         `yaml:"obs" json:"obs"`
+	Lookout      *bool         `yaml:"lookout" json:"lookout"`
 	Supervised   bool          `yaml:"supervised_agent" json:"supervised_agent"`
 
 	PassiveIface string `yaml:"passive_iface" json:"passive_iface"`

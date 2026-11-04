@@ -1,5 +1,4 @@
-// Package obs
-package obs
+package lookout
 
 import (
 	"crypto/hmac"
@@ -30,20 +29,20 @@ import (
 const sessionCookie = "vigilante_session"
 const sessionTTL = 7 * 24 * time.Hour
 
-func (e Extension) sessionKey() []byte {
-	h := hmac.New(sha256.New, []byte(e.Token))
+func (e *Console) sessionKey() []byte {
+	h := hmac.New(sha256.New, []byte(e.token))
 	h.Write([]byte("vigilante-session-v1"))
 	return h.Sum(nil)
 }
 
-func (e Extension) signSession(exp time.Time) string {
+func (e *Console) signSession(exp time.Time) string {
 	buf := binary.BigEndian.AppendUint64(nil, uint64(exp.Unix()))
 	m := hmac.New(sha256.New, e.sessionKey())
 	m.Write(buf)
 	return base64.RawURLEncoding.EncodeToString(append(buf, m.Sum(nil)...))
 }
 
-func (e Extension) authenticatedSession(r *http.Request) bool {
+func (e *Console) authenticatedSession(r *http.Request) bool {
 	c, err := r.Cookie(sessionCookie)
 	if err != nil {
 		return false
@@ -58,19 +57,24 @@ func (e Extension) authenticatedSession(r *http.Request) bool {
 	return hmac.Equal(raw[8:], m.Sum(nil)) && time.Now().Before(exp)
 }
 
-func (e Extension) setSessionCookie(w http.ResponseWriter, r *http.Request, value string, maxAge int) {
+func (e *Console) setSessionCookie(w http.ResponseWriter, r *http.Request, value string, maxAge int) {
 	http.SetCookie(w, &http.Cookie{
 		Name:     sessionCookie,
 		Value:    value,
-		Path:     "/",
+		Path:     "/lookout",
 		MaxAge:   maxAge,
 		HttpOnly: true,
 		Secure:   r.TLS != nil,
-		SameSite: http.SameSiteLaxMode,
+		// Strict keeps the session off cross-site requests, which is the
+		// console's CSRF defence for cookie-authenticated writes.
+		SameSite: http.SameSiteStrictMode,
 	})
 }
 
-func (e Extension) authorized(r *http.Request) bool {
+func (e *Console) authorized(r *http.Request) bool {
+	if e.token == "" {
+		return false
+	}
 	if e.authenticatedSession(r) {
 		return true
 	}
@@ -78,7 +82,7 @@ func (e Extension) authorized(r *http.Request) bool {
 	if token == "" {
 		token = r.Header.Get("X-Vigilante-Token")
 	}
-	return subtleCompare([]byte(token), []byte(e.Token))
+	return subtleCompare([]byte(token), []byte(e.token))
 }
 
 func subtleCompare(a, b []byte) bool {
@@ -101,21 +105,27 @@ func actorID(key string) int64 {
 
 // --- dashboard API ----------------------------------------------------------
 
-func (e Extension) dashboardAPI(w http.ResponseWriter, r *http.Request, rest string) {
-	if !e.authorized(r) {
-		w.Header().Set("WWW-Authenticate", `Bearer realm="vigilante"`)
-		http.Error(w, "unauthorized", http.StatusUnauthorized)
-		return
-	}
+func (e *Console) dashboardAPI(w http.ResponseWriter, r *http.Request, rest string) {
 	parts := strings.Split(rest, "/")
+	// Session routes are reachable before login.
 	switch {
-	case parts[0] == "session" && len(parts) == 1 && r.Method == http.MethodGet:
-		extensionJSON(w, map[string]bool{"authenticated": true}, nil)
-	case parts[0] == "login" && len(parts) == 1 && r.Method == http.MethodPost:
+	case rest == "session" && r.Method == http.MethodGet:
+		extensionJSON(w, map[string]bool{"authenticated": e.authorized(r)}, nil)
+		return
+	case rest == "login" && r.Method == http.MethodPost:
 		e.dashboardLogin(w, r)
-	case parts[0] == "logout" && len(parts) == 1 && r.Method == http.MethodPost:
+		return
+	case rest == "logout" && r.Method == http.MethodPost:
 		e.setSessionCookie(w, r, "", -1)
 		extensionJSON(w, map[string]bool{"authenticated": false}, nil)
+		return
+	}
+	if !e.authorized(r) {
+		w.Header().Set("WWW-Authenticate", `Bearer realm="vigilante"`)
+		fail(w, http.StatusUnauthorized, "unauthorized")
+		return
+	}
+	switch {
 	case parts[0] == "overview" && len(parts) == 1 && r.Method == http.MethodGet:
 		e.dashboardOverview(w, r)
 	case parts[0] == "actors" && len(parts) == 1 && r.Method == http.MethodGet:
@@ -123,21 +133,21 @@ func (e Extension) dashboardAPI(w http.ResponseWriter, r *http.Request, rest str
 	case parts[0] == "actors" && len(parts) == 2 && r.Method == http.MethodGet:
 		id, err := strconv.ParseInt(parts[1], 10, 64)
 		if err != nil {
-			http.Error(w, "invalid actor id", http.StatusBadRequest)
+			fail(w, http.StatusBadRequest, "invalid actor id")
 			return
 		}
 		e.dashboardActor(w, r, id)
 	case parts[0] == "actors" && len(parts) == 3 && parts[2] == "triage" && r.Method == http.MethodPost:
 		id, err := strconv.ParseInt(parts[1], 10, 64)
 		if err != nil {
-			http.Error(w, "invalid actor id", http.StatusBadRequest)
+			fail(w, http.StatusBadRequest, "invalid actor id")
 			return
 		}
 		e.dashboardTriage(w, r, id)
 	case parts[0] == "actors" && len(parts) == 3 && parts[2] == "dismiss" && r.Method == http.MethodPost:
 		id, err := strconv.ParseInt(parts[1], 10, 64)
 		if err != nil {
-			http.Error(w, "invalid actor id", http.StatusBadRequest)
+			fail(w, http.StatusBadRequest, "invalid actor id")
 			return
 		}
 		e.dashboardDismiss(w, r, id)
@@ -156,30 +166,30 @@ func (e Extension) dashboardAPI(w http.ResponseWriter, r *http.Request, rest str
 	case parts[0] == "sensors" && len(parts) == 2 && r.Method == http.MethodDelete:
 		id, err := strconv.ParseInt(parts[1], 10, 64)
 		if err != nil {
-			http.Error(w, "invalid sensor id", http.StatusBadRequest)
+			fail(w, http.StatusBadRequest, "invalid sensor id")
 			return
 		}
 		e.dashboardDeleteSensor(w, r, id)
 	default:
-		http.NotFound(w, r)
+		fail(w, http.StatusNotFound, "not found")
 	}
 }
 
-func (e Extension) dashboardLogin(w http.ResponseWriter, r *http.Request) {
+func (e *Console) dashboardLogin(w http.ResponseWriter, r *http.Request) {
 	body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, 4<<10))
 	if err != nil {
-		http.Error(w, "bad request", http.StatusBadRequest)
+		fail(w, http.StatusBadRequest, "bad request")
 		return
 	}
 	var req struct {
 		Token string `json:"token"`
 	}
 	if err := json.Unmarshal(body, &req); err != nil {
-		http.Error(w, "invalid request body", http.StatusBadRequest)
+		fail(w, http.StatusBadRequest, "invalid request body")
 		return
 	}
-	if !subtleCompare([]byte(req.Token), []byte(e.Token)) {
-		http.Error(w, "wrong token", http.StatusUnauthorized)
+	if e.token == "" || !subtleCompare([]byte(req.Token), []byte(e.token)) {
+		fail(w, http.StatusUnauthorized, "wrong token")
 		return
 	}
 	e.setSessionCookie(w, r, e.signSession(time.Now().Add(sessionTTL)), int(sessionTTL.Seconds()))
@@ -308,22 +318,22 @@ type dashboardSensor struct {
 
 // --- dashboard handlers -----------------------------------------------------
 
-func (e Extension) dashboardOverview(w http.ResponseWriter, r *http.Request) {
+func (e *Console) dashboardOverview(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	now := time.Now()
 	day := now.Add(-24 * time.Hour)
 
-	actors, err := e.History.Actors(ctx, 1000)
+	actors, err := e.host.Actors(ctx, 1000)
 	if err != nil {
 		extensionJSON(w, nil, err)
 		return
 	}
-	decisions, err := e.History.Suggestions(ctx, "")
+	decisions, err := e.host.Suggestions(ctx, "")
 	if err != nil {
 		extensionJSON(w, nil, err)
 		return
 	}
-	egress, err := e.History.Egress(ctx, day, 1000)
+	egress, err := e.host.Egress(ctx, day, 1000)
 	if err != nil {
 		extensionJSON(w, nil, err)
 		return
@@ -366,10 +376,7 @@ func (e Extension) dashboardOverview(w http.ResponseWriter, r *http.Request) {
 		flaggedEgress++
 	}
 
-	llm := ""
-	if e.Triager != nil {
-		llm = e.Triager.Model()
-	}
+	llm, _ := e.host.TriageModel(ctx)
 
 	out := dashboardOverview{
 		Stats: dashboardOverviewStats{
@@ -411,10 +418,10 @@ func signalCode(detail string) string {
 	return code
 }
 
-func (e Extension) dashboardActors(w http.ResponseWriter, r *http.Request) {
+func (e *Console) dashboardActors(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	filter := r.URL.Query().Get("filter")
-	actors, err := e.History.Actors(ctx, 300)
+	actors, err := e.host.Actors(ctx, 300)
 	if err != nil {
 		extensionJSON(w, nil, err)
 		return
@@ -474,10 +481,10 @@ func (e Extension) dashboardActors(w http.ResponseWriter, r *http.Request) {
 	extensionJSON(w, out, nil)
 }
 
-func (e Extension) dashboardActor(w http.ResponseWriter, r *http.Request, id int64) {
+func (e *Console) dashboardActor(w http.ResponseWriter, r *http.Request, id int64) {
 	ctx := r.Context()
 	// Find the actor by matching hashed ID.
-	actors, err := e.History.Actors(ctx, 1000)
+	actors, err := e.host.Actors(ctx, 1000)
 	if err != nil {
 		extensionJSON(w, nil, err)
 		return
@@ -494,7 +501,7 @@ func (e Extension) dashboardActor(w http.ResponseWriter, r *http.Request, id int
 		return
 	}
 	ip, ja4 := actorKeyToIPJA4(found.Key)
-	flows, err := e.History.Flows(ctx, found.Key, time.Time{}, 300)
+	flows, err := e.host.Flows(ctx, found.Key, time.Time{}, 300)
 	if err != nil {
 		extensionJSON(w, nil, err)
 		return
@@ -520,7 +527,7 @@ func (e Extension) dashboardActor(w http.ResponseWriter, r *http.Request, id int
 			Action:     f.Verdict,
 		})
 	}
-	suggestions, err := e.History.Suggestions(ctx, "")
+	suggestions, err := e.host.Suggestions(ctx, "")
 	if err != nil {
 		extensionJSON(w, nil, err)
 		return
@@ -618,13 +625,13 @@ func suggestionToDecision(s history.Suggestion) dashboardDecision {
 	}
 }
 
-func (e Extension) dashboardTriage(w http.ResponseWriter, r *http.Request, id int64) {
-	if e.Triager == nil {
-		http.Error(w, "LLM triage is not configured", http.StatusServiceUnavailable)
+func (e *Console) dashboardTriage(w http.ResponseWriter, r *http.Request, id int64) {
+	ctx := r.Context()
+	if model, err := e.host.TriageModel(ctx); err != nil || model == "" {
+		fail(w, http.StatusServiceUnavailable, "LLM triage is not configured")
 		return
 	}
-	ctx := r.Context()
-	actors, err := e.History.Actors(ctx, 1000)
+	actors, err := e.host.Actors(ctx, 1000)
 	if err != nil {
 		extensionJSON(w, nil, err)
 		return
@@ -640,7 +647,7 @@ func (e Extension) dashboardTriage(w http.ResponseWriter, r *http.Request, id in
 		extensionJSON(w, nil, errors.New("actor not found"))
 		return
 	}
-	flows, err := e.History.Flows(ctx, found.Key, time.Now().Add(-24*time.Hour), 2000)
+	flows, err := e.host.Flows(ctx, found.Key, time.Now().Add(-24*time.Hour), 2000)
 	if err != nil {
 		extensionJSON(w, nil, err)
 		return
@@ -651,7 +658,7 @@ func (e Extension) dashboardTriage(w http.ResponseWriter, r *http.Request, id in
 		Class:   found.Class,
 		Signals: ruleSignals(found.Signals),
 	}, flows)
-	verdict, err := e.Triager.Triage(ctx, in)
+	verdict, err := e.host.Triage(ctx, in)
 	if err != nil {
 		extensionJSON(w, nil, err)
 		return
@@ -669,24 +676,24 @@ func (e Extension) dashboardTriage(w http.ResponseWriter, r *http.Request, id in
 	}, nil)
 }
 
-func (e Extension) dashboardDismiss(w http.ResponseWriter, r *http.Request, id int64) {
+func (e *Console) dashboardDismiss(w http.ResponseWriter, r *http.Request, id int64) {
 	// Vigilante's history store doesn't track dismissals as a separate concept;
 	// rejecting a suggestion is the closest equivalent.
-	actors, err := e.History.Actors(r.Context(), 1000)
+	actors, err := e.host.Actors(r.Context(), 1000)
 	if err != nil {
 		extensionJSON(w, nil, err)
 		return
 	}
 	for _, a := range actors {
 		if actorID(a.Key) == id {
-			suggestions, err := e.History.Suggestions(r.Context(), "pending")
+			suggestions, err := e.host.Suggestions(r.Context(), "pending")
 			if err != nil {
 				extensionJSON(w, nil, err)
 				return
 			}
 			for _, s := range suggestions {
 				if s.ActorKey == a.Key {
-					if _, err := e.History.ResolveSuggestion(r.Context(), s.ID, "rejected", ""); err != nil {
+					if _, err := e.host.ResolveSuggestion(r.Context(), s.ID, "rejected", ""); err != nil {
 						extensionJSON(w, nil, err)
 						return
 					}
@@ -694,16 +701,16 @@ func (e Extension) dashboardDismiss(w http.ResponseWriter, r *http.Request, id i
 					return
 				}
 			}
-			http.Error(w, "no pending suggestion for actor", http.StatusNotFound)
+			fail(w, http.StatusNotFound, "no pending suggestion for actor")
 			return
 		}
 	}
-	http.Error(w, "actor not found", http.StatusNotFound)
+	fail(w, http.StatusNotFound, "actor not found")
 }
 
-func (e Extension) dashboardDecisions(w http.ResponseWriter, r *http.Request) {
+func (e *Console) dashboardDecisions(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
-	suggestions, err := e.History.Suggestions(ctx, "")
+	suggestions, err := e.host.Suggestions(ctx, "")
 	if err != nil {
 		extensionJSON(w, nil, err)
 		return
@@ -718,10 +725,10 @@ func (e Extension) dashboardDecisions(w http.ResponseWriter, r *http.Request) {
 	extensionJSON(w, out, nil)
 }
 
-func (e Extension) dashboardCreateDecision(w http.ResponseWriter, r *http.Request) {
+func (e *Console) dashboardCreateDecision(w http.ResponseWriter, r *http.Request) {
 	body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, 16<<10))
 	if err != nil {
-		http.Error(w, "bad request", http.StatusBadRequest)
+		fail(w, http.StatusBadRequest, "bad request")
 		return
 	}
 	var req struct {
@@ -734,15 +741,15 @@ func (e Extension) dashboardCreateDecision(w http.ResponseWriter, r *http.Reques
 		Reason     string `json:"reason"`
 	}
 	if err := json.Unmarshal(body, &req); err != nil {
-		http.Error(w, "invalid request body", http.StatusBadRequest)
+		fail(w, http.StatusBadRequest, "invalid request body")
 		return
 	}
 	if req.Kind != "block" && req.Kind != "challenge" && req.Kind != "rate_limit" {
-		http.Error(w, "kind must be block, challenge or rate_limit", http.StatusBadRequest)
+		fail(w, http.StatusBadRequest, "kind must be block, challenge or rate_limit")
 		return
 	}
 	if req.TTLMinutes < 1 || req.TTLMinutes > 60*24*90 {
-		http.Error(w, "ttl_minutes must be between 1 and 129600", http.StatusBadRequest)
+		fail(w, http.StatusBadRequest, "ttl_minutes must be between 1 and 129600")
 		return
 	}
 	reason := strings.TrimSpace(req.Reason)
@@ -753,38 +760,39 @@ func (e Extension) dashboardCreateDecision(w http.ResponseWriter, r *http.Reques
 	if req.IP != "" {
 		ip = req.IP
 	}
-	s := history.Suggestion{
-		ID: "manual-" + hex.EncodeToString(randBytes(8)), ActorKey: ip + "|" + req.JA4,
-		Action: req.Kind,
-		Scope:  decision.ScopeIP,
-		Target: ip,
-		Reason: reason,
-		Status: "approved",
-	}
-	if err := e.History.Suggest(r.Context(), s); err != nil {
-		extensionJSON(w, nil, err)
+	d, err := e.host.Execute(r.Context(), action.Request{
+		Action:    req.Kind,
+		Scope:     decision.ScopeIP,
+		Target:    ip,
+		Actor:     ip,
+		Reason:    reason,
+		Operator:  operator,
+		Confirmed: true, // an operator submitted this form
+	})
+	if err != nil {
+		fail(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	if e.Actions != nil {
-		_, err := e.Actions.Execute(r.Context(), action.Request{
-			Action: req.Kind,
-			Scope:  decision.ScopeIP,
-			Target: ip,
-			Actor:  ip,
-			Reason: reason,
-		})
-		if err != nil {
-			extensionJSON(w, nil, err)
-			return
-		}
+	s := history.Suggestion{
+		ID: "manual-" + hex.EncodeToString(randBytes(8)), ActorKey: ip + "|" + req.JA4,
+		Action:     req.Kind,
+		Scope:      decision.ScopeIP,
+		Target:     ip,
+		Reason:     reason,
+		Status:     "approved",
+		DecisionID: d.ID,
+	}
+	if err := e.host.Suggest(r.Context(), s); err != nil {
+		extensionJSON(w, nil, err)
+		return
 	}
 	extensionJSON(w, suggestionToDecision(s), nil)
 }
 
-func (e Extension) dashboardTransition(w http.ResponseWriter, r *http.Request, idStr, verb string) {
+func (e *Console) dashboardTransition(w http.ResponseWriter, r *http.Request, idStr, verb string) {
 	id, err := strconv.ParseInt(idStr, 10, 64)
 	if err != nil {
-		http.Error(w, "invalid decision id", http.StatusBadRequest)
+		fail(w, http.StatusBadRequest, "invalid decision id")
 		return
 	}
 	var status string
@@ -796,10 +804,10 @@ func (e Extension) dashboardTransition(w http.ResponseWriter, r *http.Request, i
 	case "revoke":
 		status = "revoked"
 	default:
-		http.NotFound(w, r)
+		fail(w, http.StatusNotFound, "not found")
 		return
 	}
-	suggestions, err := e.History.Suggestions(r.Context(), "")
+	suggestions, err := e.host.Suggestions(r.Context(), "")
 	if err != nil {
 		extensionJSON(w, nil, err)
 		return
@@ -812,24 +820,36 @@ func (e Extension) dashboardTransition(w http.ResponseWriter, r *http.Request, i
 		}
 	}
 	if found == nil {
-		http.Error(w, "not found", http.StatusNotFound)
+		fail(w, http.StatusNotFound, "not found")
 		return
 	}
-	if verb == "approve" && e.Actions != nil {
+	decisionID := found.DecisionID
+	switch verb {
+	case "approve":
 		ip, _ := actorKeyToIPJA4(found.ActorKey)
-		_, err := e.Actions.Execute(r.Context(), action.Request{
-			Action: found.Action,
-			Scope:  found.Scope,
-			Target: found.Target,
-			Actor:  ip,
-			Reason: found.Reason,
+		d, err := e.host.Execute(r.Context(), action.Request{
+			Action:    found.Action,
+			Scope:     found.Scope,
+			Target:    found.Target,
+			Actor:     ip,
+			Reason:    found.Reason,
+			Operator:  operator,
+			Confirmed: true, // an operator approved this suggestion
 		})
 		if err != nil {
-			http.Error(w, err.Error(), http.StatusBadRequest)
+			fail(w, http.StatusBadRequest, err.Error())
 			return
 		}
+		decisionID = d.ID
+	case "revoke":
+		if decisionID != "" {
+			if _, err := e.host.Revert(r.Context(), decisionID); err != nil {
+				fail(w, http.StatusBadRequest, err.Error())
+				return
+			}
+		}
 	}
-	out, err := e.History.ResolveSuggestion(r.Context(), found.ID, status, found.DecisionID)
+	out, err := e.host.ResolveSuggestion(r.Context(), found.ID, status, decisionID)
 	if err != nil {
 		extensionJSON(w, nil, err)
 		return
@@ -837,7 +857,7 @@ func (e Extension) dashboardTransition(w http.ResponseWriter, r *http.Request, i
 	extensionJSON(w, suggestionToDecision(out), nil)
 }
 
-func (e Extension) dashboardEgress(w http.ResponseWriter, r *http.Request) {
+func (e *Console) dashboardEgress(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	since := time.Now().Add(-24 * time.Hour)
 	if h := r.URL.Query().Get("hours"); h != "" {
@@ -845,7 +865,7 @@ func (e Extension) dashboardEgress(w http.ResponseWriter, r *http.Request) {
 			since = time.Now().Add(-time.Duration(n) * time.Hour)
 		}
 	}
-	egress, err := e.History.Egress(ctx, since, 500)
+	egress, err := e.host.Egress(ctx, since, 500)
 	if err != nil {
 		extensionJSON(w, nil, err)
 		return
@@ -870,36 +890,14 @@ func (e Extension) dashboardEgress(w http.ResponseWriter, r *http.Request) {
 	extensionJSON(w, out, nil)
 }
 
-func (e Extension) dashboardCreateSensor(w http.ResponseWriter, r *http.Request) {
-	body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, 4<<10))
-	if err != nil {
-		http.Error(w, "bad request", http.StatusBadRequest)
-		return
-	}
-	var req struct {
-		Name string `json:"name"`
-	}
-	if err := json.Unmarshal(body, &req); err != nil {
-		http.Error(w, "invalid request body", http.StatusBadRequest)
-		return
-	}
-	name := strings.TrimSpace(req.Name)
-	if name == "" {
-		http.Error(w, "name is required", http.StatusBadRequest)
-		return
-	}
-	key := "vk_" + hex.EncodeToString(randBytes(24))
-	s := dashboardSensor{
-		ID:        0,
-		Name:      name,
-		CreatedAt: time.Now().UTC().Format(time.RFC3339),
-		Dropped:   0,
-	}
-	extensionJSON(w, map[string]any{"sensor": s, "key": key}, nil)
+// dashboardCreateSensor refuses rather than minting a key nothing will
+// accept; sensor keys arrive with the sensor/server split (ADR 0004).
+func (e *Console) dashboardCreateSensor(w http.ResponseWriter, r *http.Request) {
+	fail(w, http.StatusNotImplemented, "sensors arrive with the sensor/server split (ADR 0004)")
 }
 
-func (e Extension) dashboardDeleteSensor(w http.ResponseWriter, r *http.Request, id int64) {
-	http.Error(w, "sensors are not persisted in this mode", http.StatusNotImplemented)
+func (e *Console) dashboardDeleteSensor(w http.ResponseWriter, r *http.Request, id int64) {
+	fail(w, http.StatusNotImplemented, "sensors arrive with the sensor/server split (ADR 0004)")
 }
 
 func randBytes(n int) []byte {

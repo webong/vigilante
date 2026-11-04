@@ -40,6 +40,7 @@ const queryClient: QueryClient = new QueryClient({
 
 const router = createRouter({
   routeTree,
+  basepath: "/lookout",
   context: { queryClient },
   defaultPreload: "intent",
   defaultPreloadStaleTime: 0,

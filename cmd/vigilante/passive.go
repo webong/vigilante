@@ -9,6 +9,7 @@ import (
 	"strings"
 
 	"github.com/webong/vigilante/ext/agent"
+	"github.com/webong/vigilante/ext/lookout"
 	"github.com/webong/vigilante/ext/obs"
 	"github.com/webong/vigilante/internal/alert"
 	"github.com/webong/vigilante/internal/correlator"
@@ -18,7 +19,7 @@ import (
 // runPassiveMode starts the AF_PACKET passive sensor: it observes traffic on an
 // interface (no forwarding, no listener) and dispatches captured flows to the
 // agent pipeline. Requires root/CAP_NET_RAW. Status/obs are served on a sidecar.
-func runPassiveMode(ctx context.Context, out io.Writer, corr *correlator.Correlator, iface, portsCSV string, queueSize int, sampleRate float64, alertStore *alert.Store, obsB *obs.Bridge, obsM func(http.ResponseWriter)) error {
+func runPassiveMode(ctx context.Context, out io.Writer, corr *correlator.Correlator, iface, portsCSV string, queueSize int, sampleRate float64, alertStore *alert.Store, obsB *obs.Bridge, lookoutB *lookout.Bridge, obsM func(http.ResponseWriter)) error {
 	if iface == "" {
 		// Linux requires an explicit interface; macOS defaults to "any".
 		iface = "any"
@@ -51,7 +52,7 @@ func runPassiveMode(ctx context.Context, out io.Writer, corr *correlator.Correla
 
 	// Status/obs sidecar so /healthz, /metrics, /obs are reachable.
 	adminAddr := adminAddrFor("127.0.0.1:0")
-	go serveTCPAdmin(ctx, out, adminAddr, queue, alertStatsOf(alertStore), obsB, obsM)
+	go serveTCPAdmin(ctx, out, adminAddr, queue, alertStatsOf(alertStore), obsB, lookoutB, obsM)
 
 	return sensor.Run(ctx)
 }

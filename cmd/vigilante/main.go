@@ -31,6 +31,7 @@ import (
 	"github.com/webong/ext/res/system/supervisor"
 	"github.com/webong/vigilante/ext/agent"
 	"github.com/webong/vigilante/ext/executor"
+	"github.com/webong/vigilante/ext/lookout"
 	"github.com/webong/vigilante/ext/obs"
 	"github.com/webong/vigilante/ext/triage"
 	"github.com/webong/vigilante/internal/action"
@@ -155,6 +156,8 @@ func run(args []string, out io.Writer) error {
 	triageEffort := fs.String("triage-effort", "", "Reasoning effort: low, medium or high")
 	egressEnabled := fs.Bool("egress", false, "Observe outbound TCP connections with Linux eBPF")
 	obsToken := fs.String("obs-token", "", "Bearer token for authenticated history and review APIs")
+	lookoutEnabled := fs.Bool("lookout", true, "Enable the lookout operator console at /lookout/ (ext.plugin/v1 vigilante.lookout@v1)")
+	lookoutToken := fs.String("lookout-token", "", "Bearer token for lookout console login (defaults to -obs-token or VIGILANTE_LOOKOUT_TOKEN / VIGILANTE_OBS_TOKEN)")
 	httpChallenge := fs.Bool("http-challenge", false, "Enable proof-of-work challenge responses")
 	httpRateLimit := fs.Bool("http-rate-limit", false, "Enable in-process rate-limit responses")
 	httpRateRPM := fs.Int("http-rate-rpm", 60, "Requests per minute for in-process rate limiting")
@@ -287,12 +290,19 @@ func run(args []string, out io.Writer) error {
 	applyStr(set["triage-effort"], triageEffort, cfg.TriageEffort)
 	applyBool(set["egress"], egressEnabled, cfg.Egress)
 	applyStr(set["obs-token"], obsToken, cfg.ObsToken)
+	applyStr(set["lookout-token"], lookoutToken, cfg.LookoutToken)
 	applyBool(set["http-challenge"], httpChallenge, cfg.HTTPChallenge)
 	applyBool(set["http-rate-limit"], httpRateLimit, cfg.HTTPRateLimit)
 	applyInt(set["http-rate-rpm"], httpRateRPM, cfg.HTTPRateRPM)
 	applyStr(set["trust-proxy"], trustProxy, cfg.TrustProxy)
 	if *obsToken == "" {
 		*obsToken = os.Getenv("VIGILANTE_OBS_TOKEN")
+	}
+	if *lookoutToken == "" {
+		*lookoutToken = os.Getenv("VIGILANTE_LOOKOUT_TOKEN")
+	}
+	if *lookoutToken == "" {
+		*lookoutToken = *obsToken
 	}
 	if *triageAPIKey == "" {
 		*triageAPIKey = os.Getenv("VIGILANTE_TRIAGE_API_KEY")
@@ -313,6 +323,9 @@ func run(args []string, out io.Writer) error {
 	}
 	if !set["obs"] && cfg.Obs != nil {
 		*obsEnabled = *cfg.Obs
+	}
+	if !set["lookout"] && cfg.Lookout != nil {
+		*lookoutEnabled = *cfg.Lookout
 	}
 	if !set["action-dry-run"] && cfg.ActionDryRun != nil {
 		*actionDryRun = *cfg.ActionDryRun
@@ -711,10 +724,33 @@ func run(args []string, out io.Writer) error {
 		}
 		fmt.Fprintln(out, "[vigilante] obs plugin active: /obs/dashboard, /obs/alerts, /obs/summary, /obs/actions, /obs/actors (ext.plugin/v1 vigilante.obs@v1)")
 	}
-	// History, review and the web dashboard wrap the obs bridge rather than
+	// History and human review REST data wrap the obs bridge rather than
 	// replace it, so both route sets stay mounted.
 	if historyStore != nil && *obsEnabled {
-		obsBridge = obs.NewExtensionBridge(obs.Extension{History: historyStore, Actions: registry, Token: *obsToken, Triager: triager}, obsBridge)
+		obsBridge = obs.NewExtensionBridge(obs.Extension{History: historyStore, Actions: registry, Token: *obsToken}, obsBridge)
+	}
+
+	// Operator console: the lookout ext plugin (web UI + console API at /lookout/)
+	// runs when a history store is present.
+	var lookoutBridge *lookout.Bridge
+	var lookoutClose func(context.Context) error
+	if historyStore != nil && *lookoutEnabled {
+		host := lookout.CoreHost{
+			History: historyStore,
+			Actions: registry,
+			Triager: triager,
+		}
+		bridge, closeFn, lerr := lookout.Open(ctx, lookout.Options{Token: *lookoutToken}, host)
+		if lerr != nil {
+			return fmt.Errorf("open lookout plugin: %w", lerr)
+		}
+		lookoutBridge, lookoutClose = bridge, closeFn
+		defer func() {
+			if lookoutClose != nil {
+				_ = lookoutClose(context.Background())
+			}
+		}()
+		fmt.Fprintln(out, "[vigilante] lookout console active: /lookout/ (ext.plugin/v1 vigilante.lookout@v1)")
 	}
 
 	// Flow publication: the stateless core hands each triaged flow to a bounded
@@ -914,11 +950,11 @@ func run(args []string, out io.Writer) error {
 	case "demo":
 		return runDemo(ctx, out, corr, store, *supervisedAgent, *sampleRate)
 	case "http":
-		return runHTTPProxy(ctx, out, corr, *listenAddr, *targetAddr, *queueSize, *tlsCert, *tlsKey, polGate, alertStore, *sampleRate, obsBridge, obsMetrics)
+		return runHTTPProxy(ctx, out, corr, *listenAddr, *targetAddr, *queueSize, *tlsCert, *tlsKey, polGate, alertStore, *sampleRate, obsBridge, lookoutBridge, obsMetrics)
 	case "tcp":
-		return runTCPProxy(ctx, out, corr, *listenAddr, *targetAddr, *queueSize, polGate, *sampleRate, *tlsCert, *tlsKey, alertStore, obsBridge, obsMetrics)
+		return runTCPProxy(ctx, out, corr, *listenAddr, *targetAddr, *queueSize, polGate, *sampleRate, *tlsCert, *tlsKey, alertStore, obsBridge, lookoutBridge, obsMetrics)
 	case "middleware":
-		return runMiddlewareMode(ctx, out, corr, *listenAddr, *targetAddr, *queueSize, *tlsCert, *tlsKey, polGate, alertStore, *sampleRate, obsBridge, obsMetrics)
+		return runMiddlewareMode(ctx, out, corr, *listenAddr, *targetAddr, *queueSize, *tlsCert, *tlsKey, polGate, alertStore, *sampleRate, obsBridge, lookoutBridge, obsMetrics)
 	case "sidecar":
 		return runSidecar(ctx, out, corr, sidecarOptions{
 			Engine:      polEngine,
@@ -936,7 +972,7 @@ func run(args []string, out io.Writer) error {
 			// External forwards to the existing gateway, so target is optional.
 			*targetAddr = gwExternal
 		}
-		return runGatewayMode(ctx, out, corr, *listenAddr, *targetAddr, *plannerURL, *plannerToken, *tlsCert, *tlsKey, *queueSize, polGate, alertStore, *sampleRate, gwPosture, gwExternal, obsBridge, obsMetrics)
+		return runGatewayMode(ctx, out, corr, *listenAddr, *targetAddr, *plannerURL, *plannerToken, *tlsCert, *tlsKey, *queueSize, polGate, alertStore, *sampleRate, gwPosture, gwExternal, obsBridge, lookoutBridge, obsMetrics)
 	case "passive":
 		if decoderEnabled {
 			iface := *passiveIface
@@ -945,7 +981,7 @@ func run(args []string, out io.Writer) error {
 			}
 			return tap.RunDecoder(ctx, tap.DecoderOptions{Command: *decoderCommand, Args: decoderArgs, Interface: iface, CaptureFile: *captureFile, KeyLogFile: *tlsKeyLog, KeyLogCredential: *tlsKeyCredential}, func(ev agent.PacketEvent) { _, _ = corr.ProcessPacket(ctx, ev) })
 		}
-		return runPassiveMode(ctx, out, corr, *passiveIface, *passivePorts, *queueSize, *sampleRate, alertStore, obsBridge, obsMetrics)
+		return runPassiveMode(ctx, out, corr, *passiveIface, *passivePorts, *queueSize, *sampleRate, alertStore, obsBridge, lookoutBridge, obsMetrics)
 	default:
 		return fmt.Errorf("unsupported mode %q (choose demo, http, tcp, middleware, gateway, passive, sidecar, eval, agent-test, or agent-worker)", *mode)
 	}
@@ -1042,7 +1078,7 @@ func isLoopbackListen(addr string) bool {
 // handler seam (tap.NewMirror): it observes every request and forwards to the
 // upstream target, terminating TLS when configured. This is the mode to use
 // when Vigilante runs inside the same process as the application.
-func runMiddlewareMode(ctx context.Context, out io.Writer, corr *correlator.Correlator, listenAddr, targetRaw string, queueSize int, tlsCert, tlsKey string, gate tap.PolicyGate, alertStore *alert.Store, sampleRate float64, obsB *obs.Bridge, obsM func(http.ResponseWriter)) error {
+func runMiddlewareMode(ctx context.Context, out io.Writer, corr *correlator.Correlator, listenAddr, targetRaw string, queueSize int, tlsCert, tlsKey string, gate tap.PolicyGate, alertStore *alert.Store, sampleRate float64, obsB *obs.Bridge, lookoutB *lookout.Bridge, obsM func(http.ResponseWriter)) error {
 	if !strings.Contains(targetRaw, "://") {
 		targetRaw = "http://" + targetRaw
 	}
@@ -1062,7 +1098,7 @@ func runMiddlewareMode(ctx context.Context, out io.Writer, corr *correlator.Corr
 
 	handler := withStatus(
 		tap.HTTPMiddlewareGate(responseFromContext(ctx).Wrap(httputil.NewSingleHostReverseProxy(targetURL), httpGate{gate}), queue, listenAddr, targetURL.Host, gate),
-		queue, alertStatsOf(alertStore), obsB, obsM)
+		queue, alertStatsOf(alertStore), obsB, lookoutB, obsM)
 	srv := &http.Server{Addr: listenAddr, Handler: handler}
 	if tlsCert != "" && tlsKey != "" {
 		srv.TLSConfig = fps.TLSConfig(&tls.Config{MinVersion: tls.VersionTLS12})
@@ -1093,7 +1129,7 @@ func runMiddlewareMode(ctx context.Context, out io.Writer, corr *correlator.Corr
 // the public listener and forwarding (optionally consulting an upstream route
 // planner); in "external:<url>" posture it attaches to an existing
 // ingress/gateway process at that endpoint, mirroring the traffic it carries.
-func runGatewayMode(ctx context.Context, out io.Writer, corr *correlator.Correlator, listenAddr, targetRaw, plannerURL, plannerToken, tlsCert, tlsKey string, queueSize int, gate tap.PolicyGate, alertStore *alert.Store, sampleRate float64, posture, externalURL string, obsB *obs.Bridge, obsM func(http.ResponseWriter)) error {
+func runGatewayMode(ctx context.Context, out io.Writer, corr *correlator.Correlator, listenAddr, targetRaw, plannerURL, plannerToken, tlsCert, tlsKey string, queueSize int, gate tap.PolicyGate, alertStore *alert.Store, sampleRate float64, posture, externalURL string, obsB *obs.Bridge, lookoutB *lookout.Bridge, obsM func(http.ResponseWriter)) error {
 	srv, err := gateway.NewServer(gateway.Options{
 		Mode:          gateway.Mode(posture),
 		ListenAddr:    listenAddr,
@@ -1127,6 +1163,9 @@ func runGatewayMode(ctx context.Context, out io.Writer, corr *correlator.Correla
 	if obsB != nil {
 		srv.SetHandlerMount("/obs", obsB)
 	}
+	if lookoutB != nil {
+		srv.SetHandlerMount("/lookout", lookoutB)
+	}
 
 	go func() {
 		<-ctx.Done()
@@ -1152,10 +1191,10 @@ func runGatewayMode(ctx context.Context, out io.Writer, corr *correlator.Correla
 	return nil
 }
 
-// withStatus mounts the status endpoints (/healthz, /health, /ready, /metrics)
-// and, when present, the obs ext plugin bridge (/obs/*) alongside the main
-// handler: those paths are claimed, everything else goes to next (the tap).
-func withStatus(next http.Handler, queue *tap.MirrorQueue, alert status.AlertStats, obsB *obs.Bridge, obsM func(http.ResponseWriter)) http.Handler {
+// withStatus mounts the status endpoints (/healthz, /health, /ready, /metrics),
+// the obs ext plugin bridge (/obs/*), and the lookout operator console (/lookout/*)
+// alongside the main handler: those paths are claimed, everything else goes to next (the tap).
+func withStatus(next http.Handler, queue *tap.MirrorQueue, alert status.AlertStats, obsB *obs.Bridge, lookoutB *lookout.Bridge, obsM func(http.ResponseWriter)) http.Handler {
 	mux := http.NewServeMux()
 	mux.Handle("/healthz", status.Handler(queue, alert))
 	mux.Handle("/health", status.Handler(queue, alert))
@@ -1164,6 +1203,10 @@ func withStatus(next http.Handler, queue *tap.MirrorQueue, alert status.AlertSta
 	if obsB != nil {
 		mux.Handle("/obs/", http.StripPrefix("/obs", obsB))
 		mux.Handle("/obs", http.StripPrefix("/obs", obsB))
+	}
+	if lookoutB != nil {
+		mux.Handle("/lookout/", http.StripPrefix("/lookout", lookoutB))
+		mux.Handle("/lookout", http.StripPrefix("/lookout", lookoutB))
 	}
 	mux.Handle("/", next)
 	return mux
@@ -1489,7 +1532,7 @@ func runDemo(ctx context.Context, out io.Writer, corr *correlator.Correlator, st
 	return nil
 }
 
-func runHTTPProxy(ctx context.Context, out io.Writer, corr *correlator.Correlator, listenAddr, targetRaw string, queueSize int, tlsCert, tlsKey string, gate tap.PolicyGate, alertStore *alert.Store, sampleRate float64, obsB *obs.Bridge, obsM func(http.ResponseWriter)) error {
+func runHTTPProxy(ctx context.Context, out io.Writer, corr *correlator.Correlator, listenAddr, targetRaw string, queueSize int, tlsCert, tlsKey string, gate tap.PolicyGate, alertStore *alert.Store, sampleRate float64, obsB *obs.Bridge, lookoutB *lookout.Bridge, obsM func(http.ResponseWriter)) error {
 	if !strings.Contains(targetRaw, "://") {
 		targetRaw = "http://" + targetRaw
 	}
@@ -1511,7 +1554,7 @@ func runHTTPProxy(ctx context.Context, out io.Writer, corr *correlator.Correlato
 		Addr: listenAddr,
 		Handler: withStatus(
 			tap.HTTPMiddlewareGate(responseFromContext(ctx).Wrap(tap.NewHTTPReverseProxyTap(targetURL, queue, listenAddr), httpGate{gate}), queue, listenAddr, targetURL.Host, gate),
-			queue, alertStatsOf(alertStore), obsB, obsM),
+			queue, alertStatsOf(alertStore), obsB, lookoutB, obsM),
 	}
 	if tlsCert != "" && tlsKey != "" {
 		srv.TLSConfig = fps.TLSConfig(&tls.Config{MinVersion: tls.VersionTLS12})
@@ -1538,7 +1581,7 @@ func runHTTPProxy(ctx context.Context, out io.Writer, corr *correlator.Correlato
 	return nil
 }
 
-func runTCPProxy(ctx context.Context, out io.Writer, corr *correlator.Correlator, listenAddr, targetAddr string, queueSize int, httpGate tap.PolicyGate, sampleRate float64, tlsCert, tlsKey string, alertStore *alert.Store, obsB *obs.Bridge, obsM func(http.ResponseWriter)) error {
+func runTCPProxy(ctx context.Context, out io.Writer, corr *correlator.Correlator, listenAddr, targetAddr string, queueSize int, httpGate tap.PolicyGate, sampleRate float64, tlsCert, tlsKey string, alertStore *alert.Store, obsB *obs.Bridge, lookoutB *lookout.Bridge, obsM func(http.ResponseWriter)) error {
 	ln, err := net.Listen("tcp", listenAddr)
 	if err != nil {
 		return err
@@ -1562,12 +1605,12 @@ func runTCPProxy(ctx context.Context, out io.Writer, corr *correlator.Correlator
 		}
 	}
 
-	// TCP has no HTTP listener of its own; expose status/obs on a small
+	// TCP has no HTTP listener of its own; expose status/obs/lookout on a small
 	// sidecar port (listenAddr with the port offset by +10000 is fragile, so we
-	// use an explicit admin listener only when obs is enabled).
-	if obsB != nil || obsM != nil {
+	// use an explicit admin listener only when obs or lookout is enabled).
+	if obsB != nil || lookoutB != nil || obsM != nil {
 		adminAddr := adminAddrFor(listenAddr)
-		go serveTCPAdmin(ctx, out, adminAddr, queue, alertStatsOf(alertStore), obsB, obsM)
+		go serveTCPAdmin(ctx, out, adminAddr, queue, alertStatsOf(alertStore), obsB, lookoutB, obsM)
 	}
 
 	go func() {
@@ -1610,10 +1653,10 @@ func adminAddrFor(listenAddr string) string {
 	return net.JoinHostPort(host, strconv.Itoa(port+10000))
 }
 
-// serveTCPAdmin runs the status/obs HTTP surface for TCP mode on a sidecar
-// listener so /healthz, /metrics, and the obs dashboard remain reachable.
-func serveTCPAdmin(ctx context.Context, out io.Writer, addr string, queue *tap.MirrorQueue, alertS status.AlertStats, obsB *obs.Bridge, obsM func(http.ResponseWriter)) {
-	mux := withStatus(http.NotFoundHandler(), queue, alertS, obsB, obsM)
+// serveTCPAdmin runs the status/obs/lookout HTTP surface for TCP mode on a sidecar
+// listener so /healthz, /metrics, the obs dashboard, and lookout remain reachable.
+func serveTCPAdmin(ctx context.Context, out io.Writer, addr string, queue *tap.MirrorQueue, alertS status.AlertStats, obsB *obs.Bridge, lookoutB *lookout.Bridge, obsM func(http.ResponseWriter)) {
+	mux := withStatus(http.NotFoundHandler(), queue, alertS, obsB, lookoutB, obsM)
 	srv := &http.Server{Addr: addr, Handler: mux}
 	go func() {
 		<-ctx.Done()
@@ -1621,7 +1664,7 @@ func serveTCPAdmin(ctx context.Context, out io.Writer, addr string, queue *tap.M
 		defer cancel()
 		_ = srv.Shutdown(shutCtx)
 	}()
-	fmt.Fprintf(out, "[vigilante] tcp admin surface on http://%s (healthz/metrics/obs)\n", addr)
+	fmt.Fprintf(out, "[vigilante] tcp admin surface on http://%s (healthz/metrics/obs/lookout)\n", addr)
 	if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 		fmt.Fprintf(out, "[vigilante] tcp admin: %v\n", err)
 	}

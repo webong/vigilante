@@ -32,9 +32,13 @@ func (s *Store) Suggest(ctx context.Context, v Suggestion) error {
 	if v.Status == "" {
 		v.Status = "pending"
 	}
-	_, err := s.db.ExecContext(ctx, `INSERT INTO suggestions(id,actor_key,action,scope,target,reason,created_at,status)
- SELECT ?,?,?,?,?,?,?,? WHERE NOT EXISTS(SELECT 1 FROM suggestions WHERE actor_key=? AND status='pending')`,
-		v.ID, v.ActorKey, v.Action, v.Scope, v.Target, v.Reason, v.CreatedAt.UnixMilli(), v.Status, v.ActorKey)
+	var resolved any
+	if v.ResolvedAt != nil {
+		resolved = v.ResolvedAt.UnixMilli()
+	}
+	_, err := s.db.ExecContext(ctx, `INSERT INTO suggestions(id,actor_key,action,scope,target,reason,created_at,status,decision_id,resolved_at)
+ SELECT ?,?,?,?,?,?,?,?,?,? WHERE NOT EXISTS(SELECT 1 FROM suggestions WHERE actor_key=? AND status='pending')`,
+		v.ID, v.ActorKey, v.Action, v.Scope, v.Target, v.Reason, v.CreatedAt.UnixMilli(), v.Status, v.DecisionID, resolved, v.ActorKey)
 	return err
 }
 func (s *Store) Suggestions(ctx context.Context, status string) ([]Suggestion, error) {
