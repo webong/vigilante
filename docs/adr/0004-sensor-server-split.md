@@ -1,6 +1,6 @@
 # ADR 0004 — Split sensors from a central server, keep context at the edge
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-10-30
 - Deciders: Vigilante maintainers
 - Related: [ADR 0001](0001-stateless-core-stateful-plugins.md), [ADR 0002](0002-open-ended-action-contract.md), [ADR 0003](0003-api-first-data-not-ui.md)

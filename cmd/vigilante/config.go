@@ -159,6 +159,10 @@ type Config struct {
 	Lookout      *bool         `yaml:"lookout" json:"lookout"`
 	Supervised   bool          `yaml:"supervised_agent" json:"supervised_agent"`
 
+	Server         string `yaml:"server" json:"server"`
+	SensorKey      string `yaml:"sensor_key" json:"sensor_key"`
+	ServerInsecure *bool  `yaml:"server_insecure" json:"server_insecure"`
+
 	PassiveIface string `yaml:"passive_iface" json:"passive_iface"`
 	PassivePorts string `yaml:"passive_ports" json:"passive_ports"`
 }

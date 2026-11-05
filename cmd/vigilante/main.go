@@ -46,6 +46,7 @@ import (
 	"github.com/webong/vigilante/internal/decision"
 	"github.com/webong/vigilante/internal/deps"
 	"github.com/webong/vigilante/internal/egress"
+	"github.com/webong/vigilante/internal/fleet"
 	"github.com/webong/vigilante/internal/flow"
 	policygate "github.com/webong/vigilante/internal/gate"
 	"github.com/webong/vigilante/internal/gateway"
@@ -158,6 +159,9 @@ func run(args []string, out io.Writer) error {
 	obsToken := fs.String("obs-token", "", "Bearer token for authenticated history and review APIs")
 	lookoutEnabled := fs.Bool("lookout", true, "Enable the lookout operator console at /lookout/ (ext.plugin/v1 vigilante.lookout@v1)")
 	lookoutToken := fs.String("lookout-token", "", "Bearer token for lookout console login (defaults to -obs-token or VIGILANTE_LOOKOUT_TOKEN / VIGILANTE_OBS_TOKEN)")
+	serverURL := fs.String("server", "", "Central Vigilante server URL for sensor mode (ships triaged flows to /v1/ingest and polls /v1/decisions)")
+	sensorKey := fs.String("sensor-key", "", "Sensor authentication key (vg_...) for -server (env VIGILANTE_SENSOR_KEY)")
+	serverInsecure := fs.Bool("server-insecure", false, "Allow a plain-HTTP -server URL on a non-loopback host")
 	httpChallenge := fs.Bool("http-challenge", false, "Enable proof-of-work challenge responses")
 	httpRateLimit := fs.Bool("http-rate-limit", false, "Enable in-process rate-limit responses")
 	httpRateRPM := fs.Int("http-rate-rpm", 60, "Requests per minute for in-process rate limiting")
@@ -291,6 +295,9 @@ func run(args []string, out io.Writer) error {
 	applyBool(set["egress"], egressEnabled, cfg.Egress)
 	applyStr(set["obs-token"], obsToken, cfg.ObsToken)
 	applyStr(set["lookout-token"], lookoutToken, cfg.LookoutToken)
+	applyStr(set["server"], serverURL, cfg.Server)
+	applyStr(set["sensor-key"], sensorKey, cfg.SensorKey)
+	applyBool(set["server-insecure"], serverInsecure, cfg.ServerInsecure)
 	applyBool(set["http-challenge"], httpChallenge, cfg.HTTPChallenge)
 	applyBool(set["http-rate-limit"], httpRateLimit, cfg.HTTPRateLimit)
 	applyInt(set["http-rate-rpm"], httpRateRPM, cfg.HTTPRateRPM)
@@ -303,6 +310,9 @@ func run(args []string, out io.Writer) error {
 	}
 	if *lookoutToken == "" {
 		*lookoutToken = *obsToken
+	}
+	if *sensorKey == "" {
+		*sensorKey = os.Getenv("VIGILANTE_SENSOR_KEY")
 	}
 	if *triageAPIKey == "" {
 		*triageAPIKey = os.Getenv("VIGILANTE_TRIAGE_API_KEY")
@@ -374,6 +384,37 @@ func run(args []string, out io.Writer) error {
 		}
 		return agent.RunWorkerIPC(ctx, *agentIPC, nil)
 	}
+	if *mode == "server" {
+		if *historyFile == "" {
+			return fmt.Errorf("-history-file is required for -mode server")
+		}
+		if *serverURL != "" {
+			return fmt.Errorf("-server cannot be used with -mode server")
+		}
+	}
+
+	var remoteDecisions *decision.Set
+	var uplink *fleet.Uplink
+	if *serverURL != "" {
+		if *sensorKey == "" {
+			return fmt.Errorf("-sensor-key (or VIGILANTE_SENSOR_KEY) is required when -server is set")
+		}
+		remoteDecisions = decision.NewSet()
+		var uerr error
+		uplink, uerr = fleet.NewUplink(fleet.UplinkOptions{
+			ServerURL: *serverURL,
+			SensorKey: *sensorKey,
+			Insecure:  *serverInsecure,
+			Remote:    remoteDecisions,
+			OnError: func(err error) {
+				fmt.Fprintln(out, "[vigilante] fleet uplink:", err)
+			},
+		})
+		if uerr != nil {
+			return uerr
+		}
+		fmt.Fprintf(out, "[vigilante] fleet sensor uplink configured -> %s\n", *serverURL)
+	}
 
 	var store graph.Store
 	if *graphFile != "" {
@@ -393,14 +434,21 @@ func run(args []string, out io.Writer) error {
 
 	// Auto-discovery: when -repo is "auto" (or empty), infer the target's
 	// source root from -target (port -> listening PID -> open cwd / checkout).
+	// Central server mode does not capture local traffic, so skip repo indexing
+	// unless explicitly requested.
+	if *mode == "server" && !set["repo"] && cfg.Repo == "" {
+		*repoTarget = ""
+	}
 	target := strings.TrimSpace(*targetAddr)
-	if t := strings.ToLower(strings.TrimSpace(*repoTarget)); t == "auto" || t == "" {
-		if root := repo.DiscoverRoot(ctx, target); root != "" {
-			fmt.Fprintf(out, "[vigilante] discovered codebase root %s for target %s\n", root, target)
-			*repoTarget = root
-		} else {
-			fmt.Fprintf(out, "[vigilante] auto repo discovery found no source root for %s; codebase context disabled\n", orDash(target))
-			*repoTarget = ""
+	if *mode != "server" {
+		if t := strings.ToLower(strings.TrimSpace(*repoTarget)); t == "auto" || t == "" {
+			if root := repo.DiscoverRoot(ctx, target); root != "" {
+				fmt.Fprintf(out, "[vigilante] discovered codebase root %s for target %s\n", root, target)
+				*repoTarget = root
+			} else {
+				fmt.Fprintf(out, "[vigilante] auto repo discovery found no source root for %s; codebase context disabled\n", orDash(target))
+				*repoTarget = ""
+			}
 		}
 	}
 
@@ -487,9 +535,9 @@ func run(args []string, out io.Writer) error {
 			}
 		}()
 	}
-	// Static policy first, then the live snapshot. The snapshot can only make
-	// the outcome stricter, never loosen a configured rule.
-	polGate = policygate.New(policygate.Options{Policy: polGate, Set: decisions, Responses: map[string]bool{"challenge": *httpChallenge, "rate_limit": *httpRateLimit}})
+	// Static policy first, then the live snapshot (local + fleet). The snapshot
+	// can only make the outcome stricter, never loosen a configured rule.
+	polGate = policygate.New(policygate.Options{Policy: polGate, Set: decisions, Remote: remoteDecisions, Responses: map[string]bool{"challenge": *httpChallenge, "rate_limit": *httpRateLimit}})
 	baseGate := polGate
 	polGate = func(r *http.Request) string {
 		if r.URL.Path == httpResponse.ChallengePath {
@@ -615,17 +663,24 @@ func run(args []string, out io.Writer) error {
 			return err
 		}
 		defer historyStore.Close()
-		if *egressEnabled {
-			go func() {
-				if err := egress.Run(ctx, egress.Options{}, func(ev history.Egress) { _ = historyStore.RecordEgress(context.Background(), ev) }); err != nil && ctx.Err() == nil {
-					fmt.Fprintln(out, "[vigilante] egress extension:", err)
-				}
-			}()
-		}
 		go runHistoryMaintenance(ctx, historyStore, *historyRetention)
 		fmt.Fprintf(out, "[vigilante] history store active: %s\n", *historyFile)
-	} else if *behaviorEnabled || *egressEnabled {
+	} else if *behaviorEnabled || (*egressEnabled && uplink == nil) {
 		return fmt.Errorf("history-file is required for behavior and egress extensions")
+	}
+	if *egressEnabled {
+		go func() {
+			if err := egress.Run(ctx, egress.Options{}, func(ev history.Egress) {
+				if historyStore != nil {
+					_ = historyStore.RecordEgress(context.Background(), ev)
+				}
+				if uplink != nil {
+					uplink.RecordEgress(ev)
+				}
+			}); err != nil && ctx.Err() == nil {
+				fmt.Fprintln(out, "[vigilante] egress extension:", err)
+			}
+		}()
 	}
 	var alertStore *alert.Store
 	if *alertFile != "" || *alertDeliver != "" {
@@ -704,7 +759,7 @@ func run(args []string, out io.Writer) error {
 		)
 		// Expose the action surface as data (capabilities + active decisions +
 		// audit) for any consumer to render. Vigilante ships no UI.
-		obsSvc.SetActions(func() obs.ActionsOutput { return actionView(registry) })
+		obsSvc.SetActions(func() obs.ActionsOutput { return actionView(registry, remoteDecisions) })
 		// Expose the actor surface as data for any consumer to render.
 		obsSvc.SetActors(func(in obs.ActorsInput) obs.ActorsOutput { return actorView(actorIdx, in) })
 		_, bridge, closeFn, oerr := obs.Open(ctx, obsSvc)
@@ -771,6 +826,15 @@ func run(args []string, out io.Writer) error {
 			sinks = append(sinks, historyStore)
 		}
 	}
+	if uplink != nil {
+		uplink.Start(ctx)
+		defer func() {
+			uctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+			defer cancel()
+			_ = uplink.Close(uctx)
+		}()
+		sinks = append(sinks, uplink)
+	}
 	if len(sinks) > 0 {
 		publisher = flow.NewPublisher(sinks, *queueSize, 2)
 		defer func() {
@@ -781,6 +845,10 @@ func run(args []string, out io.Writer) error {
 			}
 		}()
 		fmt.Fprintf(out, "[vigilante] flow publisher active (%d extension sinks)\n", len(sinks))
+	}
+
+	if *mode == "server" {
+		return runServerMode(ctx, out, *listenAddr, *tlsCert, *tlsKey, historyStore, publisher, decisions, alertStore, obsBridge, lookoutBridge, obsMetrics)
 	}
 
 	var gw *agent.Gateway
@@ -983,8 +1051,55 @@ func run(args []string, out io.Writer) error {
 		}
 		return runPassiveMode(ctx, out, corr, *passiveIface, *passivePorts, *queueSize, *sampleRate, alertStore, obsBridge, lookoutBridge, obsMetrics)
 	default:
-		return fmt.Errorf("unsupported mode %q (choose demo, http, tcp, middleware, gateway, passive, sidecar, eval, agent-test, or agent-worker)", *mode)
+		return fmt.Errorf("unsupported mode %q (choose demo, http, tcp, middleware, gateway, passive, sidecar, server, eval, agent-test, or agent-worker)", *mode)
 	}
+}
+
+// runServerMode runs the central Vigilante fleet server (ADR 0004): it serves
+// /v1/ingest and /v1/decisions for edge sensors alongside the status, obs, and
+// lookout console endpoints.
+func runServerMode(ctx context.Context, out io.Writer, listenAddr, tlsCert, tlsKey string, historyStore *history.Store, publisher *flow.Publisher, decisions *decision.Set, alertStore *alert.Store, obsB *obs.Bridge, lookoutB *lookout.Bridge, obsM func(http.ResponseWriter)) error {
+	var publishFn func(context.Context, flow.Event) error
+	if publisher != nil {
+		publishFn = func(_ context.Context, ev flow.Event) error {
+			if !publisher.Publish(ev) {
+				return fmt.Errorf("publisher queue full")
+			}
+			return nil
+		}
+	}
+	fleetSrv := fleet.NewServer(fleet.ServerOptions{
+		Store:     historyStore,
+		Publish:   publishFn,
+		Decisions: decisions,
+	})
+	fleetMux := http.NewServeMux()
+	fleetSrv.Register(fleetMux)
+
+	handler := withStatus(fleetMux, nil, alertStatsOf(alertStore), obsB, lookoutB, obsM)
+	srv := &http.Server{Addr: listenAddr, Handler: handler}
+	if tlsCert != "" && tlsKey != "" {
+		srv.TLSConfig = &tls.Config{MinVersion: tls.VersionTLS12}
+	}
+	go func() {
+		<-ctx.Done()
+		shutCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		_ = srv.Shutdown(shutCtx)
+	}()
+
+	scheme := "http"
+	if tlsCert != "" && tlsKey != "" {
+		scheme = "https"
+	}
+	fmt.Fprintf(out, "[vigilante] fleet server active on %s://%s (/v1/ingest, /v1/decisions, /obs, /lookout)\n", scheme, listenAddr)
+	if scheme == "https" {
+		return srv.ListenAndServeTLS(tlsCert, tlsKey)
+	}
+	if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+		return err
+	}
+	return nil
 }
 
 // sidecarOptions configures the ingress decision sidecar.
@@ -1357,67 +1472,86 @@ func actorView(idx *actor.Index, in obs.ActorsInput) obs.ActorsOutput {
 	return out
 }
 
-// actionView adapts the host action registry into the obs read model. It is the
-// data any consumer needs to render a response UI: what is available, what is
-// in force, and what has been decided.
-func actionView(r *action.Registry) obs.ActionsOutput {
+// actionView adapts the host action registry and optional fleet decision set
+// into the obs read model. It is the data any consumer needs to render a
+// response UI: what is available, what is in force (with its source: "local"
+// or "fleet"), and what has been decided.
+func actionView(r *action.Registry, fleetSets ...*decision.Set) obs.ActionsOutput {
 	out := obs.ActionsOutput{
 		Capabilities: []obs.ActionCapability{},
 		Active:       []obs.ActiveDecision{},
 		Decisions:    []obs.ActionDecision{},
 	}
-	if r == nil {
-		return out
-	}
-	for _, c := range r.Capabilities() {
-		scopes := make([]string, len(c.Scopes))
-		for i, s := range c.Scopes {
-			scopes[i] = string(s)
+	if r != nil {
+		for _, c := range r.Capabilities() {
+			scopes := make([]string, len(c.Scopes))
+			for i, s := range c.Scopes {
+				scopes[i] = string(s)
+			}
+			params := make([]obs.ActionParam, len(c.Params))
+			for i, p := range c.Params {
+				params[i] = obs.ActionParam{Name: p.Name, Label: p.Label, Type: p.Type, Required: p.Required, Default: p.Default}
+			}
+			out.Capabilities = append(out.Capabilities, obs.ActionCapability{
+				ID:          c.ID,
+				Label:       c.Label,
+				Description: c.Description,
+				Scopes:      scopes,
+				DefaultTTL:  c.DefaultTTL,
+				MaxTTL:      c.MaxTTL,
+				Reversible:  c.Reversible,
+				Destructive: c.Destructive,
+				Params:      params,
+			})
 		}
-		params := make([]obs.ActionParam, len(c.Params))
-		for i, p := range c.Params {
-			params[i] = obs.ActionParam{Name: p.Name, Label: p.Label, Type: p.Type, Required: p.Required, Default: p.Default}
+		for _, e := range r.Active() {
+			out.Active = append(out.Active, obs.ActiveDecision{
+				ID:      e.ID,
+				Action:  e.Action,
+				Scope:   string(e.Scope),
+				Target:  e.Target,
+				Reason:  e.Reason,
+				Actor:   e.Actor,
+				Source:  "local",
+				Created: e.Created,
+				Expires: e.Expires,
+			})
 		}
-		out.Capabilities = append(out.Capabilities, obs.ActionCapability{
-			ID:          c.ID,
-			Label:       c.Label,
-			Description: c.Description,
-			Scopes:      scopes,
-			DefaultTTL:  c.DefaultTTL,
-			MaxTTL:      c.MaxTTL,
-			Reversible:  c.Reversible,
-			Destructive: c.Destructive,
-			Params:      params,
-		})
+		for _, d := range r.Decisions() {
+			out.Decisions = append(out.Decisions, obs.ActionDecision{
+				ID:        d.ID,
+				Action:    d.Action,
+				Label:     d.Label,
+				Scope:     string(d.Scope),
+				Target:    d.Target,
+				Actor:     d.Actor,
+				Reason:    d.Reason,
+				Operator:  d.Operator,
+				Status:    string(d.Status),
+				RevertRef: d.RevertRef,
+				Detail:    d.Detail,
+				StartedAt: d.StartedAt,
+				ExpiresAt: d.ExpiresAt,
+			})
+		}
 	}
-	for _, e := range r.Active() {
-		out.Active = append(out.Active, obs.ActiveDecision{
-			ID:      e.ID,
-			Action:  e.Action,
-			Scope:   string(e.Scope),
-			Target:  e.Target,
-			Reason:  e.Reason,
-			Actor:   e.Actor,
-			Created: e.Created,
-			Expires: e.Expires,
-		})
-	}
-	for _, d := range r.Decisions() {
-		out.Decisions = append(out.Decisions, obs.ActionDecision{
-			ID:        d.ID,
-			Action:    d.Action,
-			Label:     d.Label,
-			Scope:     string(d.Scope),
-			Target:    d.Target,
-			Actor:     d.Actor,
-			Reason:    d.Reason,
-			Operator:  d.Operator,
-			Status:    string(d.Status),
-			RevertRef: d.RevertRef,
-			Detail:    d.Detail,
-			StartedAt: d.StartedAt,
-			ExpiresAt: d.ExpiresAt,
-		})
+	for _, fs := range fleetSets {
+		if fs == nil {
+			continue
+		}
+		for _, e := range fs.Active() {
+			out.Active = append(out.Active, obs.ActiveDecision{
+				ID:      e.ID,
+				Action:  e.Action,
+				Scope:   string(e.Scope),
+				Target:  e.Target,
+				Reason:  e.Reason,
+				Actor:   e.Actor,
+				Source:  "fleet",
+				Created: e.Created,
+				Expires: e.Expires,
+			})
+		}
 	}
 	return out
 }

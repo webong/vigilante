@@ -8,6 +8,7 @@ import (
 func TestNormalizeCommand(t *testing.T) {
 	for _, tc := range []struct{ in, want []string }{
 		{[]string{"run", "reverse", "--protocol", "tcp"}, []string{"-mode", "reverse", "--protocol", "tcp"}},
+		{[]string{"server", "-history-file", "h.db"}, []string{"-mode", "server", "-history-file", "h.db"}},
 		{[]string{"eval"}, []string{"-mode", "eval"}},
 		{[]string{"-mode", "http"}, []string{"-mode", "http"}},
 		{[]string{"run"}, []string{"-help"}},

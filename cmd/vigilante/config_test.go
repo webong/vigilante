@@ -545,3 +545,27 @@ func TestLookoutConfigKeys(t *testing.T) {
 		t.Errorf("lookout_token = %q, want lk_secret_token", cfg.LookoutToken)
 	}
 }
+
+func TestFleetConfigKeys(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "fleet.yaml")
+	data := "mode: http\n" +
+		"server: https://vigilante.example.com\n" +
+		"sensor_key: vg_1234567890abcdef1234567890abcdef\n" +
+		"server_insecure: true\n"
+	if err := os.WriteFile(path, []byte(data), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := loadConfig(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Server != "https://vigilante.example.com" {
+		t.Errorf("server = %q", cfg.Server)
+	}
+	if cfg.SensorKey != "vg_1234567890abcdef1234567890abcdef" {
+		t.Errorf("sensor_key = %q", cfg.SensorKey)
+	}
+	if cfg.ServerInsecure == nil || !*cfg.ServerInsecure {
+		t.Errorf("server_insecure = %v, want true", cfg.ServerInsecure)
+	}
+}

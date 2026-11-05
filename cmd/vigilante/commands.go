@@ -12,7 +12,7 @@ func normalizeCommand(args []string) []string {
 		}
 	}
 	switch args[0] {
-	case "passive", "inline", "reverse", "middle", "demo", "eval":
+	case "passive", "inline", "reverse", "middle", "server", "demo", "eval":
 		return append([]string{"-mode", args[0]}, args[1:]...)
 	}
 	return args

@@ -38,11 +38,20 @@ func TestActionView(t *testing.T) {
 	if len(view.Active) != 1 {
 		t.Fatalf("active = %+v, want 1", view.Active)
 	}
-	if view.Active[0].Target != "203.0.113.9" {
-		t.Fatalf("active target = %q, want the normalized IP", view.Active[0].Target)
+	if view.Active[0].Target != "203.0.113.9" || view.Active[0].Source != "local" {
+		t.Fatalf("active = %+v, want normalized IP and source=local", view.Active[0])
 	}
 	if len(view.Decisions) != 1 || view.Decisions[0].Status != "applied" {
 		t.Fatalf("decisions = %+v", view.Decisions)
+	}
+
+	fleetSet := decision.NewSet()
+	if err := fleetSet.Put(decision.Entry{ID: "f1", Action: "block", Scope: decision.ScopeIP, Target: "198.51.100.4"}); err != nil {
+		t.Fatal(err)
+	}
+	combined := actionView(reg, fleetSet)
+	if len(combined.Active) != 2 || combined.Active[1].Source != "fleet" {
+		t.Fatalf("combined active = %+v, want 2 (local + fleet)", combined.Active)
 	}
 }
 
