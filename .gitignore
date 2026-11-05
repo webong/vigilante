@@ -16,3 +16,6 @@ vigilante-graph.json
 
 # OS metadata
 .DS_Store
+
+# Frontend dependencies
+node_modules/

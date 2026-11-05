@@ -357,11 +357,12 @@ function AddSensorDialog({ open, onOpenChange }: { open: boolean; onOpenChange: 
 function InstallCommand({ name, sensorKey }: { name: string; sensorKey: string }) {
   const [copied, setCopied] = useState(false)
   const command = [
-    `VIGILANTE_OBS_TOKEN=${sensorKey} \\`,
+    `VIGILANTE_SENSOR_KEY=${sensorKey} \\`,
     "vigilante \\",
     `  -server ${location.origin} \\`,
-    "  -upstream http://127.0.0.1:3000 \\",
-    "  -listen :443 -domain your-site.example \\",
+    "  -mode http \\",
+    "  -target http://127.0.0.1:3000 \\",
+    "  -listen :8080 \\",
     "  -egress",
   ].join("\n")
 
@@ -388,9 +389,8 @@ function InstallCommand({ name, sensorKey }: { name: string; sensorKey: string }
         <pre className="overflow-x-auto p-3 font-mono text-[10px]/relaxed">{command}</pre>
       </div>
       <p className="text-[10px]/relaxed text-muted-foreground">
-        Set <code className="font-mono">-upstream</code> to your app and{" "}
-        <code className="font-mono">-domain</code> for a Let's Encrypt certificate (or pass{" "}
-        <code className="font-mono">-tls-cert</code>/<code className="font-mono">-tls-key</code>). Behind a
+        Set <code className="font-mono">-target</code> to your upstream app and{" "}
+        <code className="font-mono">-tls-cert</code>/<code className="font-mono">-tls-key</code> for HTTPS. Behind a
         CDN, add <code className="font-mono">-trust-proxy</code> with its ranges.{" "}
         <code className="font-mono">-egress</code> needs root or CAP_BPF.
       </p>
