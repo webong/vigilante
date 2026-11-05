@@ -73,7 +73,7 @@ func (s *Store) Flows(ctx context.Context, key string, since time.Time, limit in
 		limit = 500
 	}
 	args := []any{}
-	q := `SELECT id,actor_key,ts,severity,verdict,summary,method,path,src,target,protocol,host,user_agent,fingerprint,headers,status,duration_ns,bytes_in,bytes_out FROM flows`
+	q := `SELECT id,actor_key,ts,severity,verdict,summary,method,path,src,target,protocol,host,user_agent,fingerprint,headers,status,duration_ns,bytes_in,bytes_out,sensor_id FROM flows`
 	if key != "" {
 		q += ` WHERE actor_key=?`
 		args = append(args, key)
@@ -97,7 +97,7 @@ func (s *Store) Flows(ctx context.Context, key string, since time.Time, limit in
 		var f Flow
 		var ts, dur int64
 		var headers string
-		if err := rows.Scan(&f.FlowID, &f.ActorKey, &ts, &f.Severity, &f.Verdict, &f.Summary, &f.Method, &f.Path, &f.SrcAddr, &f.TargetAddr, &f.Protocol, &f.Host, &f.UserAgent, &f.TLSFingerprint, &headers, &f.Status, &dur, &f.BytesIn, &f.BytesOut); err != nil {
+		if err := rows.Scan(&f.FlowID, &f.ActorKey, &ts, &f.Severity, &f.Verdict, &f.Summary, &f.Method, &f.Path, &f.SrcAddr, &f.TargetAddr, &f.Protocol, &f.Host, &f.UserAgent, &f.TLSFingerprint, &headers, &f.Status, &dur, &f.BytesIn, &f.BytesOut, &f.SensorID); err != nil {
 			return nil, err
 		}
 		f.Timestamp = time.UnixMilli(ts).UTC()

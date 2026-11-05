@@ -48,6 +48,7 @@ type Event struct {
 	Findings        []alert.Finding   `json:"findings,omitempty"`
 	Recommendations []string          `json:"recommendations,omitempty"`
 	Signals         []string          `json:"signals,omitempty"`
+	SensorID        int64             `json:"sensor_id,omitempty"`
 }
 
 // Sink consumes published events. It may block; the publisher isolates that

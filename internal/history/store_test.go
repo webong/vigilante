@@ -83,3 +83,59 @@ func TestStorePersistsHistoryAndReview(t *testing.T) {
 		t.Fatalf("pruned=%+v err=%v", flows, err)
 	}
 }
+
+func TestStoreSensorsLifecycle(t *testing.T) {
+	s, err := Open(filepath.Join(t.TempDir(), "sensors.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	ctx := context.Background()
+
+	sn, err := s.CreateSensor(ctx, "edge-1", "hash-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if sn.ID <= 0 || sn.Name != "edge-1" || sn.LastSeenAt != nil || sn.EgressSince != nil {
+		t.Fatalf("created sensor = %+v", sn)
+	}
+
+	got, err := s.LookupSensorByHash(ctx, "hash-1")
+	if err != nil || got.ID != sn.ID {
+		t.Fatalf("lookup = %+v, err = %v", got, err)
+	}
+
+	now := time.Now().UTC().Truncate(time.Millisecond)
+	if err := s.TouchSensor(ctx, sn.ID, now, 7, true); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Ingest(ctx, flow.Event{FlowID: "f-sensor-1", Timestamp: now, SrcAddr: "198.51.100.77:443", Method: "GET", Path: "/", SensorID: sn.ID}); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.RecordEgress(ctx, Egress{SensorID: sn.ID, TS: now, Comm: "nginx", DstIP: "93.184.216.34", DstPort: 443, Count: 1}); err != nil {
+		t.Fatal(err)
+	}
+
+	list, err := s.Sensors(ctx)
+	if err != nil || len(list) != 1 {
+		t.Fatalf("sensors = %+v, err = %v", list, err)
+	}
+	if list[0].Dropped != 7 || list[0].LastSeenAt == nil || list[0].EgressSince == nil {
+		t.Fatalf("touched sensor = %+v", list[0])
+	}
+
+	if err := s.DeleteSensor(ctx, sn.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.LookupSensorByHash(ctx, "hash-1"); err == nil {
+		t.Fatal("expected deleted sensor key hash lookup to fail")
+	}
+	flows, err := s.Flows(ctx, "", time.Time{}, 10)
+	if err != nil || len(flows) != 0 {
+		t.Fatalf("expected sensor flows deleted, got %+v (err=%v)", flows, err)
+	}
+	eg, err := s.Egress(ctx, now.Add(-time.Minute), 10)
+	if err != nil || len(eg) != 0 {
+		t.Fatalf("expected sensor egress deleted, got %+v (err=%v)", eg, err)
+	}
+}

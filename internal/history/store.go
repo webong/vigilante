@@ -31,6 +31,9 @@ func Open(path string) (*Store, error) {
 		db.Close()
 		return nil, fmt.Errorf("history schema: %w", err)
 	}
+	// Upgrade pre-ADR-0004 databases that predate sensor_id columns.
+	_, _ = db.Exec(`ALTER TABLE flows ADD COLUMN sensor_id INTEGER NOT NULL DEFAULT 0`)
+	_, _ = db.Exec(`ALTER TABLE egress ADD COLUMN sensor_id INTEGER NOT NULL DEFAULT 0`)
 	return &Store{db: db}, nil
 }
 func (s *Store) Close() error {
@@ -40,7 +43,12 @@ func (s *Store) Close() error {
 	return s.db.Close()
 }
 
-const schema = `CREATE TABLE IF NOT EXISTS actors (
+const schema = `CREATE TABLE IF NOT EXISTS sensors (
+ id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL, key_hash TEXT NOT NULL UNIQUE,
+ created_at INTEGER NOT NULL, last_seen_at INTEGER, egress_since INTEGER,
+ dropped INTEGER NOT NULL DEFAULT 0
+);
+CREATE TABLE IF NOT EXISTS actors (
  key TEXT PRIMARY KEY, ip TEXT NOT NULL, fingerprint TEXT NOT NULL DEFAULT '', user_agent TEXT NOT NULL DEFAULT '',
  first_seen INTEGER NOT NULL, last_seen INTEGER NOT NULL, requests INTEGER NOT NULL DEFAULT 0,
  class TEXT NOT NULL DEFAULT 'unknown', risk INTEGER NOT NULL DEFAULT 0, signals TEXT NOT NULL DEFAULT '[]', identity TEXT NOT NULL DEFAULT ''
@@ -51,7 +59,8 @@ CREATE TABLE IF NOT EXISTS flows (
  path TEXT NOT NULL DEFAULT '', src TEXT NOT NULL DEFAULT '', target TEXT NOT NULL DEFAULT '', protocol TEXT NOT NULL DEFAULT '',
  host TEXT NOT NULL DEFAULT '', user_agent TEXT NOT NULL DEFAULT '', fingerprint TEXT NOT NULL DEFAULT '',
  headers TEXT NOT NULL DEFAULT '{}', status INTEGER NOT NULL DEFAULT 0, duration_ns INTEGER NOT NULL DEFAULT 0,
- bytes_in INTEGER NOT NULL DEFAULT 0, bytes_out INTEGER NOT NULL DEFAULT 0
+ bytes_in INTEGER NOT NULL DEFAULT 0, bytes_out INTEGER NOT NULL DEFAULT 0,
+ sensor_id INTEGER NOT NULL DEFAULT 0
 );
 CREATE INDEX IF NOT EXISTS flows_actor_ts ON flows(actor_key, ts);
 CREATE INDEX IF NOT EXISTS flows_ts ON flows(ts);
@@ -64,7 +73,8 @@ CREATE INDEX IF NOT EXISTS suggestions_status ON suggestions(status, created_at)
 CREATE TABLE IF NOT EXISTS egress (
  id INTEGER PRIMARY KEY AUTOINCREMENT, ts INTEGER NOT NULL, comm TEXT NOT NULL, pid INTEGER NOT NULL,
  uid INTEGER NOT NULL, dst_ip TEXT NOT NULL, dst_port INTEGER NOT NULL, count INTEGER NOT NULL,
- UNIQUE(ts, comm, pid, uid, dst_ip, dst_port) ON CONFLICT REPLACE
+ sensor_id INTEGER NOT NULL DEFAULT 0,
+ UNIQUE(ts, comm, pid, uid, dst_ip, dst_port, sensor_id) ON CONFLICT REPLACE
 );
 CREATE INDEX IF NOT EXISTS egress_ts ON egress(ts);`
 
@@ -91,8 +101,8 @@ func (s *Store) Ingest(ctx context.Context, ev flow.Event) error {
 		key, ip, ev.TLSFingerprint, ev.UserAgent, ts.UnixMilli(), ts.UnixMilli()); err != nil {
 		return err
 	}
-	_, err = tx.ExecContext(ctx, `INSERT INTO flows(id,actor_key,ts,severity,verdict,summary,method,path,src,target,protocol,host,user_agent,fingerprint,headers,status,duration_ns,bytes_in,bytes_out)
- VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(id) DO NOTHING`, ev.FlowID, key, ts.UnixMilli(), ev.Severity, ev.Verdict, ev.Summary, ev.Method, ev.Path, ev.SrcAddr, ev.TargetAddr, ev.Protocol, ev.Host, ev.UserAgent, ev.TLSFingerprint, headers, ev.Status, ev.Duration, ev.BytesIn, ev.BytesOut)
+	_, err = tx.ExecContext(ctx, `INSERT INTO flows(id,actor_key,ts,severity,verdict,summary,method,path,src,target,protocol,host,user_agent,fingerprint,headers,status,duration_ns,bytes_in,bytes_out,sensor_id)
+ VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(id) DO NOTHING`, ev.FlowID, key, ts.UnixMilli(), ev.Severity, ev.Verdict, ev.Summary, ev.Method, ev.Path, ev.SrcAddr, ev.TargetAddr, ev.Protocol, ev.Host, ev.UserAgent, ev.TLSFingerprint, headers, ev.Status, ev.Duration, ev.BytesIn, ev.BytesOut, ev.SensorID)
 	if err != nil {
 		return err
 	}
