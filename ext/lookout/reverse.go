@@ -76,6 +76,20 @@ func (reverseHost) Triage(ctx context.Context, in triage.Input) (triage.Verdict,
 	return call(ctx, opTriage, in)
 }
 
+func (reverseHost) Sensors(ctx context.Context) ([]history.Sensor, error) {
+	out, err := call(ctx, opSensors, Empty{})
+	return out.Sensors, err
+}
+
+func (reverseHost) CreateSensor(ctx context.Context, name string) (CreatedSensor, error) {
+	return call(ctx, opCreateSensor, CreateSensorIn{Name: name})
+}
+
+func (reverseHost) DeleteSensor(ctx context.Context, id int64) error {
+	_, err := call(ctx, opDeleteSensor, DeleteSensorIn{ID: id})
+	return err
+}
+
 // hostReverseOptions serves vigilante.console@v1 from h on the host side.
 func hostReverseOptions(h Host) *engine.ReverseOptions {
 	ref := engine.ContractRef{Name: ConsoleContractName, Version: ConsoleContractVersion}
@@ -130,6 +144,19 @@ func hostReverseOptions(h Host) *engine.ReverseOptions {
 				})
 			case opTriage.Operation.Name:
 				return serve(req, func(in triage.Input) (triage.Verdict, error) { return h.Triage(ctx, in) })
+			case opSensors.Operation.Name:
+				return serve(req, func(Empty) (SensorsOut, error) {
+					s, err := h.Sensors(ctx)
+					return SensorsOut{Sensors: s}, err
+				})
+			case opCreateSensor.Operation.Name:
+				return serve(req, func(in CreateSensorIn) (CreatedSensor, error) {
+					return h.CreateSensor(ctx, in.Name)
+				})
+			case opDeleteSensor.Operation.Name:
+				return serve(req, func(in DeleteSensorIn) (Empty, error) {
+					return Empty{}, h.DeleteSensor(ctx, in.ID)
+				})
 			}
 			return nil, &engine.RemoteError{Code: "unsupported", Message: "unknown console operation"}
 		},

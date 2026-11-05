@@ -7,13 +7,16 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 	"time"
 
 	"github.com/webong/vigilante/internal/action"
 	"github.com/webong/vigilante/internal/decision"
+	"github.com/webong/vigilante/internal/fleet"
 	"github.com/webong/vigilante/internal/history"
 )
 
@@ -70,13 +73,58 @@ func (e Extension) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	case path == "history/egress" && r.Method == http.MethodGet:
 		since := time.Now().Add(-24 * time.Hour)
 		if h := r.URL.Query().Get("hours"); h != "" {
-			fmt.Sscanf(h, "%d", new(int))
+			var hours int
+			if _, err := fmt.Sscanf(h, "%d", &hours); err == nil && hours > 0 {
+				since = time.Now().Add(-time.Duration(hours) * time.Hour)
+			}
 		}
 		out, err := e.History.Egress(ctx, since, queryLimit(r))
 		extensionJSON(w, out, err)
+	case path == "history/sensors" && r.Method == http.MethodGet:
+		out, err := e.History.Sensors(ctx)
+		extensionJSON(w, out, err)
+	case path == "history/sensors" && r.Method == http.MethodPost:
+		e.createSensor(w, r)
+	case strings.HasPrefix(path, "history/sensors/") && r.Method == http.MethodDelete:
+		id, err := strconv.ParseInt(strings.TrimPrefix(path, "history/sensors/"), 10, 64)
+		if err != nil {
+			http.Error(w, "invalid sensor id", http.StatusBadRequest)
+			return
+		}
+		if err := e.History.DeleteSensor(ctx, id); err != nil {
+			extensionJSON(w, nil, err)
+			return
+		}
+		w.WriteHeader(http.StatusNoContent)
 	default:
 		http.NotFound(w, r)
 	}
+}
+
+func (e Extension) createSensor(w http.ResponseWriter, r *http.Request) {
+	body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, 4<<10))
+	if err != nil {
+		http.Error(w, "bad request", http.StatusBadRequest)
+		return
+	}
+	var req struct {
+		Name string `json:"name"`
+	}
+	if err := json.Unmarshal(body, &req); err != nil || strings.TrimSpace(req.Name) == "" {
+		http.Error(w, "sensor name is required", http.StatusBadRequest)
+		return
+	}
+	plain, hash, err := fleet.GenerateKey()
+	if err != nil {
+		extensionJSON(w, nil, err)
+		return
+	}
+	sensor, err := e.History.CreateSensor(r.Context(), req.Name, hash)
+	if err != nil {
+		extensionJSON(w, nil, err)
+		return
+	}
+	extensionJSON(w, map[string]any{"sensor": sensor, "key": plain}, nil)
 }
 
 func (e Extension) resolve(w http.ResponseWriter, r *http.Request, id string) {

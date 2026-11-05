@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"testing/fstest"
 	"time"
 
 	"github.com/webong/vigilante/ext/triage"
@@ -407,7 +408,25 @@ func TestLookoutEgressAndSensors(t *testing.T) {
 		t.Fatal("expected egress records")
 	}
 
-	// 2. Sensors endpoints
+	// 2. Sensors endpoints (create, list, delete)
+	req = httptest.NewRequest(http.MethodPost, "/api/sensors", strings.NewReader(`{"name":"edge-us-east-1"}`))
+	req.Header.Set("Authorization", authHeader)
+	rec = httptest.NewRecorder()
+	bridge.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("sensors create code = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	var created struct {
+		Sensor dashboardSensor `json:"sensor"`
+		Key    string          `json:"key"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &created); err != nil {
+		t.Fatalf("unmarshal created sensor: %v", err)
+	}
+	if created.Sensor.Name != "edge-us-east-1" || !strings.HasPrefix(created.Key, "vg_") {
+		t.Fatalf("unexpected created sensor: %+v", created)
+	}
+
 	req = httptest.NewRequest(http.MethodGet, "/api/sensors", nil)
 	req.Header.Set("Authorization", authHeader)
 	rec = httptest.NewRecorder()
@@ -415,43 +434,53 @@ func TestLookoutEgressAndSensors(t *testing.T) {
 	if rec.Code != http.StatusOK {
 		t.Fatalf("sensors list code = %d", rec.Code)
 	}
-
-	req = httptest.NewRequest(http.MethodPost, "/api/sensors", strings.NewReader(`{"name":"test"}`))
-	req.Header.Set("Authorization", authHeader)
-	rec = httptest.NewRecorder()
-	bridge.ServeHTTP(rec, req)
-	if rec.Code != http.StatusNotImplemented {
-		t.Fatalf("sensors create code = %d, want 501", rec.Code)
+	var listed []dashboardSensor
+	if err := json.Unmarshal(rec.Body.Bytes(), &listed); err != nil {
+		t.Fatalf("unmarshal listed sensors: %v", err)
+	}
+	if len(listed) != 1 || listed[0].ID != created.Sensor.ID {
+		t.Fatalf("unexpected listed sensors: %+v", listed)
 	}
 
-	req = httptest.NewRequest(http.MethodDelete, "/api/sensors/1", nil)
+	req = httptest.NewRequest(http.MethodDelete, fmt.Sprintf("/api/sensors/%d", created.Sensor.ID), nil)
 	req.Header.Set("Authorization", authHeader)
 	rec = httptest.NewRecorder()
 	bridge.ServeHTTP(rec, req)
-	if rec.Code != http.StatusNotImplemented {
-		t.Fatalf("sensors delete code = %d, want 501", rec.Code)
+	if rec.Code != http.StatusNoContent {
+		t.Fatalf("sensors delete code = %d, want 204", rec.Code)
+	}
+
+	req = httptest.NewRequest(http.MethodGet, "/api/sensors", nil)
+	req.Header.Set("Authorization", authHeader)
+	rec = httptest.NewRecorder()
+	bridge.ServeHTTP(rec, req)
+	if err := json.Unmarshal(rec.Body.Bytes(), &listed); err != nil || len(listed) != 0 {
+		t.Fatalf("expected 0 sensors after delete, got %+v (err=%v)", listed, err)
 	}
 }
 
-func TestLookoutSPAFallback(t *testing.T) {
+func TestLookoutSPAAndUnbuiltFallback(t *testing.T) {
 	bridge, _, _, _ := setupLookoutTest(t, "op-secret")
 
-	// When UI dist is not built, accessing SPA routes should give 404 with guidance
-	req := httptest.NewRequest(http.MethodGet, "/", nil)
-	rec := httptest.NewRecorder()
-	bridge.ServeHTTP(rec, req)
-	if rec.Code != http.StatusNotFound {
-		t.Fatalf("expected 404 when unbuilt, got %d", rec.Code)
-	}
-	if !strings.Contains(rec.Body.String(), "console not built") {
-		t.Fatalf("expected 'console not built' in body, got: %s", rec.Body.String())
+	// Built UI serves index.html at root and client-side routes.
+	for _, path := range []string{"/", "/visitors", "/sensors"} {
+		req := httptest.NewRequest(http.MethodGet, path, nil)
+		rec := httptest.NewRecorder()
+		bridge.ServeHTTP(rec, req)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("GET %s code = %d, want 200", path, rec.Code)
+		}
+		if !strings.Contains(rec.Body.String(), "<!doctype html>") && !strings.Contains(rec.Body.String(), "<html") {
+			t.Fatalf("GET %s body missing HTML shell: %s", path, rec.Body.String())
+		}
 	}
 
-	// Client-side route
-	req = httptest.NewRequest(http.MethodGet, "/visitors", nil)
-	rec = httptest.NewRecorder()
-	bridge.ServeHTTP(rec, req)
-	if rec.Code != http.StatusNotFound {
-		t.Fatalf("expected 404 when unbuilt, got %d", rec.Code)
+	// Unbuilt UI fallback returns 404 with build guidance.
+	unbuilt := &Console{token: "op-secret", ui: fstest.MapFS{}}
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	rec := httptest.NewRecorder()
+	unbuilt.ServeHTTP(rec, req)
+	if rec.Code != http.StatusNotFound || !strings.Contains(rec.Body.String(), "console not built") {
+		t.Fatalf("expected 404 unbuilt guidance, got %d: %s", rec.Code, rec.Body.String())
 	}
 }

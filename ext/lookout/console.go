@@ -160,7 +160,7 @@ func (e *Console) dashboardAPI(w http.ResponseWriter, r *http.Request, rest stri
 	case parts[0] == "egress" && len(parts) == 1 && r.Method == http.MethodGet:
 		e.dashboardEgress(w, r)
 	case parts[0] == "sensors" && len(parts) == 1 && r.Method == http.MethodGet:
-		extensionJSON(w, []dashboardSensor{}, nil)
+		e.dashboardSensors(w, r)
 	case parts[0] == "sensors" && len(parts) == 1 && r.Method == http.MethodPost:
 		e.dashboardCreateSensor(w, r)
 	case parts[0] == "sensors" && len(parts) == 2 && r.Method == http.MethodDelete:
@@ -874,8 +874,8 @@ func (e *Console) dashboardEgress(w http.ResponseWriter, r *http.Request) {
 	for _, eg := range egress {
 		flags := []string{}
 		out = append(out, dashboardEgress{
-			ID:          int64(0), // egress IDs are DB auto-increment, not exposed
-			SensorID:    0,
+			ID:          eg.ID,
+			SensorID:    eg.SensorID,
 			Comm:        eg.Comm,
 			UID:         eg.UID,
 			DstIP:       eg.DstIP,
@@ -890,14 +890,74 @@ func (e *Console) dashboardEgress(w http.ResponseWriter, r *http.Request) {
 	extensionJSON(w, out, nil)
 }
 
-// dashboardCreateSensor refuses rather than minting a key nothing will
-// accept; sensor keys arrive with the sensor/server split (ADR 0004).
+func toDashboardSensor(s history.Sensor) dashboardSensor {
+	var lastSeen, egressSince *string
+	if s.LastSeenAt != nil {
+		v := s.LastSeenAt.UTC().Format(time.RFC3339)
+		lastSeen = &v
+	}
+	if s.EgressSince != nil {
+		v := s.EgressSince.UTC().Format(time.RFC3339)
+		egressSince = &v
+	}
+	return dashboardSensor{
+		ID:          s.ID,
+		Name:        s.Name,
+		CreatedAt:   s.CreatedAt.UTC().Format(time.RFC3339),
+		LastSeenAt:  lastSeen,
+		EgressSince: egressSince,
+		Dropped:     s.Dropped,
+	}
+}
+
+func (e *Console) dashboardSensors(w http.ResponseWriter, r *http.Request) {
+	sensors, err := e.host.Sensors(r.Context())
+	if err != nil {
+		extensionJSON(w, nil, err)
+		return
+	}
+	out := make([]dashboardSensor, 0, len(sensors))
+	for _, s := range sensors {
+		out = append(out, toDashboardSensor(s))
+	}
+	extensionJSON(w, out, nil)
+}
+
 func (e *Console) dashboardCreateSensor(w http.ResponseWriter, r *http.Request) {
-	fail(w, http.StatusNotImplemented, "sensors arrive with the sensor/server split (ADR 0004)")
+	body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, 4<<10))
+	if err != nil {
+		fail(w, http.StatusBadRequest, "bad request")
+		return
+	}
+	var req struct {
+		Name string `json:"name"`
+	}
+	if err := json.Unmarshal(body, &req); err != nil {
+		fail(w, http.StatusBadRequest, "invalid request body")
+		return
+	}
+	name := strings.TrimSpace(req.Name)
+	if name == "" {
+		fail(w, http.StatusBadRequest, "sensor name is required")
+		return
+	}
+	created, err := e.host.CreateSensor(r.Context(), name)
+	if err != nil {
+		extensionJSON(w, nil, err)
+		return
+	}
+	extensionJSON(w, map[string]any{
+		"sensor": toDashboardSensor(created.Sensor),
+		"key":    created.Key,
+	}, nil)
 }
 
 func (e *Console) dashboardDeleteSensor(w http.ResponseWriter, r *http.Request, id int64) {
-	fail(w, http.StatusNotImplemented, "sensors arrive with the sensor/server split (ADR 0004)")
+	if err := e.host.DeleteSensor(r.Context(), id); err != nil {
+		extensionJSON(w, nil, err)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
 }
 
 func randBytes(n int) []byte {

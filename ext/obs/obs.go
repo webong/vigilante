@@ -102,6 +102,7 @@ type ActiveDecision struct {
 	Target  string    `json:"target"`
 	Reason  string    `json:"reason,omitempty"`
 	Actor   string    `json:"actor,omitempty"`
+	Source  string    `json:"source,omitempty"` // "local" or "fleet"
 	Created time.Time `json:"created"`
 	Expires time.Time `json:"expires,omitempty"`
 }

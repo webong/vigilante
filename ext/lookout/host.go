@@ -13,6 +13,7 @@ import (
 	"github.com/webong/ext/pkg/ext-go/engine/transport/inprocess"
 	"github.com/webong/vigilante/ext/triage"
 	"github.com/webong/vigilante/internal/action"
+	"github.com/webong/vigilante/internal/fleet"
 	"github.com/webong/vigilante/internal/history"
 )
 
@@ -67,6 +68,23 @@ func (h CoreHost) Triage(ctx context.Context, in triage.Input) (triage.Verdict, 
 		return triage.Verdict{}, errors.New("LLM actor triage is not configured")
 	}
 	return h.Triager.Triage(ctx, in)
+}
+func (h CoreHost) Sensors(ctx context.Context) ([]history.Sensor, error) {
+	return h.History.Sensors(ctx)
+}
+func (h CoreHost) CreateSensor(ctx context.Context, name string) (CreatedSensor, error) {
+	plain, hash, err := fleet.GenerateKey()
+	if err != nil {
+		return CreatedSensor{}, err
+	}
+	sensor, err := h.History.CreateSensor(ctx, name, hash)
+	if err != nil {
+		return CreatedSensor{}, err
+	}
+	return CreatedSensor{Sensor: sensor, Key: plain}, nil
+}
+func (h CoreHost) DeleteSensor(ctx context.Context, id int64) error {
+	return h.History.DeleteSensor(ctx, id)
 }
 
 // Bridge forwards HTTP requests under the console's mount to the guest.

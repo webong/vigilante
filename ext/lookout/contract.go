@@ -79,6 +79,9 @@ type Host interface {
 	// TriageModel is "" when LLM actor triage is not configured.
 	TriageModel(ctx context.Context) (string, error)
 	Triage(ctx context.Context, in triage.Input) (triage.Verdict, error)
+	Sensors(ctx context.Context) ([]history.Sensor, error)
+	CreateSensor(ctx context.Context, name string) (CreatedSensor, error)
+	DeleteSensor(ctx context.Context, id int64) error
 }
 
 // Reverse-call payloads.
@@ -124,6 +127,19 @@ type (
 	TriageModelOut struct {
 		Model string `json:"model"`
 	}
+	SensorsOut struct {
+		Sensors []history.Sensor `json:"sensors"`
+	}
+	CreateSensorIn struct {
+		Name string `json:"name"`
+	}
+	CreatedSensor struct {
+		Sensor history.Sensor `json:"sensor"`
+		Key    string         `json:"key"`
+	}
+	DeleteSensorIn struct {
+		ID int64 `json:"id"`
+	}
 	Empty struct{}
 )
 
@@ -143,16 +159,19 @@ func consoleMethod[In, Out any](op string) author.Method[In, Out] {
 
 // Console operations, offered by the host.
 var (
-	opActors      = consoleMethod[ActorsIn, ActorsOut]("actors")
-	opFlows       = consoleMethod[FlowsIn, FlowsOut]("flows")
-	opEgress      = consoleMethod[EgressIn, EgressOut]("egress")
-	opSuggestions = consoleMethod[SuggestionsIn, SuggestionsOut]("suggestions")
-	opSuggest     = consoleMethod[SuggestIn, Empty]("suggest")
-	opResolve     = consoleMethod[ResolveIn, history.Suggestion]("resolve-suggestion")
-	opExecute     = consoleMethod[action.Request, action.Decision]("execute-action")
-	opRevert      = consoleMethod[RevertIn, action.Decision]("revert-action")
-	opTriageModel = consoleMethod[Empty, TriageModelOut]("triage-model")
-	opTriage      = consoleMethod[triage.Input, triage.Verdict]("triage-actor")
+	opActors       = consoleMethod[ActorsIn, ActorsOut]("actors")
+	opFlows        = consoleMethod[FlowsIn, FlowsOut]("flows")
+	opEgress       = consoleMethod[EgressIn, EgressOut]("egress")
+	opSuggestions  = consoleMethod[SuggestionsIn, SuggestionsOut]("suggestions")
+	opSuggest      = consoleMethod[SuggestIn, Empty]("suggest")
+	opResolve      = consoleMethod[ResolveIn, history.Suggestion]("resolve-suggestion")
+	opExecute      = consoleMethod[action.Request, action.Decision]("execute-action")
+	opRevert       = consoleMethod[RevertIn, action.Decision]("revert-action")
+	opTriageModel  = consoleMethod[Empty, TriageModelOut]("triage-model")
+	opTriage       = consoleMethod[triage.Input, triage.Verdict]("triage-actor")
+	opSensors      = consoleMethod[Empty, SensorsOut]("sensors")
+	opCreateSensor = consoleMethod[CreateSensorIn, CreatedSensor]("create-sensor")
+	opDeleteSensor = consoleMethod[DeleteSensorIn, Empty]("delete-sensor")
 )
 
 func consoleOperations() []engine.Operation {
@@ -161,6 +180,7 @@ func consoleOperations() []engine.Operation {
 		opSuggestions.Operation, opSuggest.Operation, opResolve.Operation,
 		opExecute.Operation, opRevert.Operation,
 		opTriageModel.Operation, opTriage.Operation,
+		opSensors.Operation, opCreateSensor.Operation, opDeleteSensor.Operation,
 	}
 }
 
