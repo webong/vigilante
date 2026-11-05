@@ -132,6 +132,47 @@ func (s *Set) Put(e Entry) error {
 	return nil
 }
 
+// Replace atomically swaps the set's entries with the valid, non-expired
+// entries in list. Used by the sensor decision poller to apply a fresh fleet
+// snapshot without touching the local decision set.
+func (s *Set) Replace(list []Entry) {
+	if s == nil {
+		return
+	}
+	now := s.now()
+	next := make(map[string]Entry, len(list))
+	for _, e := range list {
+		if e.ID == "" || e.Action == "" || !e.Scope.Valid() || e.expired(now) {
+			continue
+		}
+		switch e.Scope {
+		case ScopeGlobal:
+			e.Target = "*"
+		case ScopeIP:
+			host := NormalizeIP(e.Target)
+			if host == "" {
+				continue
+			}
+			e.Target = host
+		case ScopeCIDR:
+			if _, _, err := net.ParseCIDR(e.Target); err != nil {
+				continue
+			}
+		case ScopeActor, ScopeFingerprint:
+			if strings.TrimSpace(e.Target) == "" {
+				continue
+			}
+		}
+		if e.Created.IsZero() {
+			e.Created = now.UTC()
+		}
+		next[e.Key()] = e
+	}
+	s.mu.Lock()
+	s.entries = next
+	s.mu.Unlock()
+}
+
 // Remove drops the entry with the given decision ID, reporting whether one was
 // present.
 func (s *Set) Remove(id string) bool {

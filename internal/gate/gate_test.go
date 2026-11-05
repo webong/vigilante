@@ -92,3 +92,51 @@ func TestNilRequestAllows(t *testing.T) {
 		t.Fatalf("gate = %q, want allow", got)
 	}
 }
+
+func TestDualSetStrictestWins(t *testing.T) {
+	local := decision.NewSet()
+	remote := decision.NewSet()
+
+	// Local rate_limit vs Remote block -> block wins
+	if err := local.Put(decision.Entry{ID: "l1", Action: "rate_limit", Scope: decision.ScopeIP, Target: "203.0.113.10"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := remote.Put(decision.Entry{ID: "r1", Action: "block", Scope: decision.ScopeIP, Target: "203.0.113.10"}); err != nil {
+		t.Fatal(err)
+	}
+	// Local challenge vs Remote rate_limit -> challenge wins
+	if err := local.Put(decision.Entry{ID: "l2", Action: "challenge", Scope: decision.ScopeIP, Target: "203.0.113.11"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := remote.Put(decision.Entry{ID: "r2", Action: "rate_limit", Scope: decision.ScopeIP, Target: "203.0.113.11"}); err != nil {
+		t.Fatal(err)
+	}
+	// Remote-only decision
+	if err := remote.Put(decision.Entry{ID: "r3", Action: "challenge", Scope: decision.ScopeIP, Target: "203.0.113.12"}); err != nil {
+		t.Fatal(err)
+	}
+
+	var hitID string
+	gate := New(Options{
+		Set:       local,
+		Remote:    remote,
+		Responses: map[string]bool{"challenge": true, "rate_limit": true},
+		OnHit:     func(e decision.Entry) { hitID = e.ID },
+	})
+
+	if got := gate(request("203.0.113.10:1234")); got != "block" || hitID != "r1" {
+		t.Fatalf("gate = %q (hit %q), want block (hit r1)", got, hitID)
+	}
+	if got := gate(request("203.0.113.11:1234")); got != "challenge" || hitID != "l2" {
+		t.Fatalf("gate = %q (hit %q), want challenge (hit l2)", got, hitID)
+	}
+	if got := gate(request("203.0.113.12:1234")); got != "challenge" || hitID != "r3" {
+		t.Fatalf("gate = %q (hit %q), want challenge (hit r3)", got, hitID)
+	}
+
+	// Replacing remote set never erases local decisions.
+	remote.Replace(nil)
+	if got := gate(request("203.0.113.10:1234")); got != "rate_limit" || hitID != "l1" {
+		t.Fatalf("after remote clear: gate = %q (hit %q), want rate_limit (hit l1)", got, hitID)
+	}
+}

@@ -18,8 +18,12 @@ import (
 type Options struct {
 	// Policy is the static policy gate (may be nil).
 	Policy tap.PolicyGate
-	// Set is the live decision snapshot (may be nil).
+	// Set is the local live decision snapshot (may be nil).
 	Set *decision.Set
+	// Remote is the fleet decision snapshot pulled from a central server (may be nil).
+	// When both Set and Remote match a request, the gate enforces whichever
+	// outcome is strictest (block/deny > challenge > rate_limit).
+	Remote *decision.Set
 	// Actor derives an actor key from the request (default: client IP).
 	Actor func(*http.Request) string
 	// Fingerprint derives a fingerprint key (TLS/JA3) from the request. The
@@ -43,7 +47,7 @@ func New(opts Options) tap.PolicyGate {
 				return v
 			}
 		}
-		if opts.Set == nil {
+		if opts.Set == nil && opts.Remote == nil {
 			return "allow"
 		}
 		ip := clientIP(r)
@@ -58,25 +62,55 @@ func New(opts Options) tap.PolicyGate {
 		if opts.Fingerprint != nil {
 			fingerprint = opts.Fingerprint(r)
 		}
-		entry, ok := opts.Set.Lookup(ip, actor, fingerprint)
-		if !ok {
+		localEntry, localOK := opts.Set.Lookup(ip, actor, fingerprint)
+		remoteEntry, remoteOK := opts.Remote.Lookup(ip, actor, fingerprint)
+		if !localOK && !remoteOK {
 			return "allow"
 		}
-		if opts.OnHit != nil {
-			opts.OnHit(entry)
+		winner := localEntry
+		outcome := ""
+		if localOK {
+			outcome = resolveAction(localEntry.Action, opts.Responses)
 		}
-		switch entry.Action {
-		case "deny", "block":
-			return entry.Action
-		case "challenge", "rate_limit":
-			if opts.Responses[entry.Action] {
-				return entry.Action
+		if remoteOK {
+			remoteOutcome := resolveAction(remoteEntry.Action, opts.Responses)
+			if !localOK || actionRank(remoteOutcome) > actionRank(outcome) {
+				winner = remoteEntry
+				outcome = remoteOutcome
 			}
-			return "block"
-		default:
-			// Unknown actions fail closed when no response extension handles them.
-			return "block"
 		}
+		if opts.OnHit != nil {
+			opts.OnHit(winner)
+		}
+		return outcome
+	}
+}
+
+func resolveAction(action string, responses map[string]bool) string {
+	switch action {
+	case "deny", "block":
+		return action
+	case "challenge", "rate_limit":
+		if responses[action] {
+			return action
+		}
+		return "block"
+	default:
+		// Unknown actions fail closed when no response extension handles them.
+		return "block"
+	}
+}
+
+func actionRank(action string) int {
+	switch action {
+	case "deny", "block":
+		return 3
+	case "challenge":
+		return 2
+	case "rate_limit":
+		return 1
+	default:
+		return 0
 	}
 }
 
