@@ -99,10 +99,10 @@ their own, and static policy still runs first and can only be made stricter.
 The server's registry applies a decision once and pushes it to every sensor
 through the snapshot; each sensor enforces it at L7 through its gate. Remote
 executors (`notify`, `vigilante.action@v1` plugins for a WAF or CDN) run on the
-server, once for the fleet. Host-local executors, the firewall `block`, stay
-sensor-local in this version: a fleet `block` is enforced by the sensor gate,
-not programmed into each sensor's firewall. Pushing firewall changes to
-sensors is a follow-up, not part of this decision.
+server, once for the fleet. Host-local firewall executors (`block`) are
+reconciled on each sensor as snapshots arrive: IP-scoped `block`/`deny`
+decisions are programmed into the sensor's `block.Enforcer`, and revoked or
+expired fleet blocks are removed unless a local decision still blocks the IP.
 
 ### 6. Sensors authenticate with per-sensor keys; the server trusts nothing inside a batch
 

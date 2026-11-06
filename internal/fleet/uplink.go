@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/url"
 	"strings"
@@ -14,6 +15,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/webong/vigilante/internal/block"
 	"github.com/webong/vigilante/internal/decision"
 	"github.com/webong/vigilante/internal/flow"
 	"github.com/webong/vigilante/internal/history"
@@ -30,6 +32,13 @@ type UplinkOptions struct {
 	Insecure bool
 	// Remote is the sensor's secondary decision.Set populated from GET /v1/decisions.
 	Remote *decision.Set
+	// Local is the sensor's local decision.Set. When Enforcer is set, an IP
+	// removed from Remote is only unblocked in the host firewall if Local does
+	// not also block it.
+	Local *decision.Set
+	// Enforcer optionally reconciles IP-scoped fleet block decisions into the
+	// sensor's local host firewall (iptables/nft/log).
+	Enforcer *block.Enforcer
 	// BufferSize is the bounded queue capacity before incoming items are dropped (default 1024).
 	BufferSize int
 	// BatchSize is the maximum number of items per POST /v1/ingest batch (default 100).
@@ -53,6 +62,8 @@ type Uplink struct {
 	baseURL       string
 	sensorKey     string
 	remote        *decision.Set
+	local         *decision.Set
+	enforcer      *block.Enforcer
 	batchSize     int
 	maxBacklog    int
 	flushInterval time.Duration
@@ -72,6 +83,7 @@ type Uplink struct {
 	failures      int
 	nextRetry     time.Time
 	etag          string
+	enforcedIPs   map[string]struct{}
 
 	stopOnce sync.Once
 	stopCh   chan struct{}
@@ -119,6 +131,8 @@ func NewUplink(opts UplinkOptions) (*Uplink, error) {
 		baseURL:       strings.TrimRight(u.String(), "/"),
 		sensorKey:     strings.TrimSpace(opts.SensorKey),
 		remote:        opts.Remote,
+		local:         opts.Local,
+		enforcer:      opts.Enforcer,
 		batchSize:     batchSize,
 		maxBacklog:    maxBacklog,
 		flushInterval: flushInt,
@@ -127,6 +141,7 @@ func NewUplink(opts UplinkOptions) (*Uplink, error) {
 		onError:       opts.OnError,
 		eventsCh:      make(chan flow.Event, bufSize),
 		egressCh:      make(chan history.Egress, bufSize),
+		enforcedIPs:   map[string]struct{}{},
 		stopCh:        make(chan struct{}),
 	}, nil
 }
@@ -423,6 +438,7 @@ func (u *Uplink) PollOnce(ctx context.Context) error {
 	defer resp.Body.Close()
 
 	if resp.StatusCode == http.StatusNotModified {
+		u.reconcileFirewall(ctx)
 		return nil
 	}
 	if resp.StatusCode != http.StatusOK {
@@ -455,7 +471,88 @@ func (u *Uplink) PollOnce(ctx context.Context) error {
 	u.mu.Lock()
 	u.etag = newETag
 	u.mu.Unlock()
+	u.reconcileFirewall(ctx)
 	return nil
+}
+
+// reconcileFirewall programs IP-scoped fleet block/deny decisions into the
+// sensor's local block.Enforcer and removes expired or revoked fleet blocks
+// unless the IP is still blocked in the local decision set.
+func (u *Uplink) reconcileFirewall(ctx context.Context) {
+	if u == nil || u.enforcer == nil || u.remote == nil {
+		return
+	}
+	_ = u.remote.Sweep()
+	active := u.remote.Active()
+	desired := make(map[string]string, len(active))
+	for _, e := range active {
+		if e.Scope == decision.ScopeIP && (e.Action == "block" || e.Action == "deny") {
+			if ip := decision.NormalizeIP(e.Target); ip != "" {
+				reason := e.Reason
+				if reason == "" {
+					reason = e.ID
+				}
+				desired[ip] = reason
+			}
+		}
+	}
+
+	u.mu.Lock()
+	var toAdd []struct {
+		ip     string
+		reason string
+	}
+	for ip, reason := range desired {
+		if _, ok := u.enforcedIPs[ip]; !ok {
+			toAdd = append(toAdd, struct {
+				ip     string
+				reason string
+			}{ip: ip, reason: reason})
+		}
+	}
+	var toRemove []string
+	for ip := range u.enforcedIPs {
+		if _, ok := desired[ip]; !ok {
+			toRemove = append(toRemove, ip)
+		}
+	}
+	u.mu.Unlock()
+
+	for _, item := range toAdd {
+		parsed := net.ParseIP(item.ip)
+		if parsed == nil || parsed.IsLoopback() || parsed.IsUnspecified() {
+			continue
+		}
+		if err := u.enforcer.Block(ctx, parsed, "fleet:"+item.reason); err == nil {
+			u.mu.Lock()
+			u.enforcedIPs[item.ip] = struct{}{}
+			u.mu.Unlock()
+		}
+	}
+
+	for _, ip := range toRemove {
+		if u.locallyBlocked(ip) {
+			u.mu.Lock()
+			delete(u.enforcedIPs, ip)
+			u.mu.Unlock()
+			continue
+		}
+		parsed := net.ParseIP(ip)
+		if parsed != nil {
+			_ = u.enforcer.Unblock(ctx, parsed)
+		}
+		u.mu.Lock()
+		delete(u.enforcedIPs, ip)
+		u.mu.Unlock()
+	}
+}
+
+func (u *Uplink) locallyBlocked(ip string) bool {
+	if u.local == nil {
+		return false
+	}
+	e, ok := u.local.Lookup(ip, "", "")
+	return ok && (e.Action == "block" || e.Action == "deny")
 }
 
 // Ensure URL import is used for callers inspecting parsed URLs.

@@ -2,13 +2,16 @@ package fleet
 
 import (
 	"context"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
+	"github.com/webong/vigilante/internal/block"
 	"github.com/webong/vigilante/internal/decision"
 	"github.com/webong/vigilante/internal/flow"
 	"github.com/webong/vigilante/internal/gate"
@@ -301,4 +304,88 @@ func TestEndToEndServerAndTwoSensors(t *testing.T) {
 	if err := uplink2.Flush(ctx); err == nil {
 		t.Fatal("expected revoked sensor key upload to fail with 401")
 	}
+}
+
+func TestUplinkFirewallReconciliation(t *testing.T) {
+	ctx := context.Background()
+	store, err := history.Open(filepath.Join(t.TempDir(), "fw.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+
+	serverDecisions := decision.NewSet()
+	fleetSrv := NewServer(ServerOptions{Store: store, Decisions: serverDecisions})
+	mux := http.NewServeMux()
+	fleetSrv.Register(mux)
+	ts := httptest.NewServer(mux)
+	defer ts.Close()
+
+	key, hash, err := GenerateKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.CreateSensor(ctx, "fw-sensor", hash); err != nil {
+		t.Fatal(err)
+	}
+
+	var mu sync.Mutex
+	blocked := map[string]bool{}
+	enforcer, err := block.New(block.Options{
+		Mode: block.ModeLog,
+		OnBlock: func(ip net.IP, _ string) {
+			mu.Lock()
+			blocked[ip.String()] = true
+			mu.Unlock()
+		},
+		OnUnblock: func(ip net.IP) {
+			mu.Lock()
+			delete(blocked, ip.String())
+			mu.Unlock()
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	localSet := decision.NewSet()
+	remoteSet := decision.NewSet()
+	uplink, err := NewUplink(UplinkOptions{
+		ServerURL: ts.URL,
+		SensorKey: key,
+		Remote:    remoteSet,
+		Local:     localSet,
+		Enforcer:  enforcer,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// 1. Add two fleet IP blocks on server and poll.
+	_ = serverDecisions.Put(decision.Entry{ID: "fb-1", Action: "block", Scope: decision.ScopeIP, Target: "203.0.113.50", Reason: "scan"})
+	_ = serverDecisions.Put(decision.Entry{ID: "fb-2", Action: "block", Scope: decision.ScopeIP, Target: "203.0.113.51", Reason: "brute"})
+	if err := uplink.PollOnce(ctx); err != nil {
+		t.Fatal(err)
+	}
+	mu.Lock()
+	if !blocked["203.0.113.50"] || !blocked["203.0.113.51"] {
+		t.Fatalf("expected both IPs blocked in local firewall, got %v", blocked)
+	}
+	mu.Unlock()
+
+	// 2. Also locally block 203.0.113.50, then remove both from the server.
+	_ = localSet.Put(decision.Entry{ID: "lb-1", Action: "block", Scope: decision.ScopeIP, Target: "203.0.113.50"})
+	serverDecisions.Remove("fb-1")
+	serverDecisions.Remove("fb-2")
+	if err := uplink.PollOnce(ctx); err != nil {
+		t.Fatal(err)
+	}
+	mu.Lock()
+	if !blocked["203.0.113.50"] {
+		t.Fatal("expected locally blocked IP 203.0.113.50 to remain blocked in firewall")
+	}
+	if blocked["203.0.113.51"] {
+		t.Fatal("expected revoked fleet IP 203.0.113.51 to be unblocked in firewall")
+	}
+	mu.Unlock()
 }
