@@ -135,3 +135,32 @@ func TestMultiSinkFansOut(t *testing.T) {
 		t.Fatalf("fan-out = %d/%d, want 1/1", a.count(), b.count())
 	}
 }
+
+func TestBrokerStreamsAndDropsWithoutBlocking(t *testing.T) {
+	b := NewBroker(2)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	highCh := b.Subscribe(ctx, "high")
+	allCh := b.Subscribe(ctx, "")
+
+	_ = b.Ingest(ctx, Event{FlowID: "low-1", Severity: "low"})
+	_ = b.Ingest(ctx, Event{FlowID: "high-1", Severity: "high"})
+	_ = b.Ingest(ctx, Event{FlowID: "crit-1", Severity: "critical"})
+	// Overflow allCh (capacity 2) without reading.
+	_ = b.Ingest(ctx, Event{FlowID: "info-overflow", Severity: "info"})
+
+	ev1 := <-highCh
+	ev2 := <-highCh
+	if ev1.FlowID != "high-1" || ev2.FlowID != "crit-1" {
+		t.Fatalf("highCh got %q, %q", ev1.FlowID, ev2.FlowID)
+	}
+	if b.Dropped() == 0 {
+		t.Fatal("expected dropped count > 0 on overflowed subscriber")
+	}
+
+	cancel()
+	// Drain and verify channel closes on ctx cancellation.
+	for range allCh {
+	}
+}

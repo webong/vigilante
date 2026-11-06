@@ -77,12 +77,12 @@ authenticated RPC. Exposing `execute`/`revert` over HTTP without authentication
 would turn the data surface into a remote-control surface, which is a separate,
 security-reviewed change (see ADR 0002 non-goals).
 
-### 5. Streaming is a future addition, not a different model
+### 5. Streaming is another transport over `flow.Event`
 
-Live flow delivery (SSE, WebSocket, a queue) would reuse the `flow.Sink` /
-`flow.Event` contract. It is not built yet because it needs backpressure and
-subscription semantics the request/response bridge does not have; when it is
-added it is another transport over the same event type, not a new data model.
+Live flow delivery (`GET /obs/stream`, Server-Sent Events with optional
+`?severity=` filtering) reuses the `flow.Sink` / `flow.Event` contract via
+`flow.Broker`. Each subscriber gets its own bounded buffer; slow subscribers
+drop events locally without backpressuring the publisher or other consumers.
 
 ## Consequences
 

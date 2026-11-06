@@ -12,6 +12,7 @@ import (
 
 	"github.com/webong/ext/pkg/ext-go/engine"
 	"github.com/webong/vigilante/internal/alert"
+	"github.com/webong/vigilante/internal/flow"
 )
 
 // newTestStore writes a couple of alerts and returns a Store satisfying Reader.
@@ -197,6 +198,31 @@ func TestExtPluginEndToEnd(t *testing.T) {
 		bridge.ServeHTTP(rr, httptest.NewRequest(http.MethodGet, "/nope", nil))
 		if rr.Code != http.StatusNotFound {
 			t.Fatalf("status = %d, want 404", rr.Code)
+		}
+	})
+
+	t.Run("SSE stream via broker", func(t *testing.T) {
+		broker := flow.NewBroker(8)
+		bridge.SetBroker(broker)
+		sctx, cancel := context.WithCancel(context.Background())
+		req := httptest.NewRequest(http.MethodGet, "/stream?severity=high", nil).WithContext(sctx)
+		rr := httptest.NewRecorder()
+		done := make(chan struct{})
+		go func() {
+			bridge.ServeHTTP(rr, req)
+			close(done)
+		}()
+		// Wait briefly for subscription, then publish events and cancel.
+		for {
+			_ = broker.Ingest(ctx, flow.Event{FlowID: "f-stream-1", Severity: "critical", Verdict: "block"})
+			if strings.Contains(rr.Body.String(), "f-stream-1") {
+				break
+			}
+		}
+		cancel()
+		<-done
+		if ct := rr.Header().Get("Content-Type"); !strings.Contains(ct, "text/event-stream") {
+			t.Fatalf("Content-Type = %q, want text/event-stream", ct)
 		}
 	})
 	_ = io.Discard

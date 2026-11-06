@@ -25,6 +25,7 @@ import (
 	"github.com/webong/ext/pkg/ext-go/engine/guest/author"
 	"github.com/webong/ext/pkg/ext-go/engine/transport/inprocess"
 	"github.com/webong/vigilante/internal/alert"
+	"github.com/webong/vigilante/internal/flow"
 )
 
 const (
@@ -406,11 +407,24 @@ func (s *Service) renderDashboard() string {
 type Bridge struct {
 	session   *engine.Session
 	extension Extension
+	broker    *flow.Broker
 	next      *Bridge
 }
 
 // NewBridge wraps an engine session running the obs plugin.
 func NewBridge(session *engine.Session) *Bridge { return &Bridge{session: session} }
+
+// SetBroker attaches a live flow.Broker to expose Server-Sent Events at
+// GET /obs/stream (?severity=).
+func (b *Bridge) SetBroker(broker *flow.Broker) {
+	if b == nil {
+		return
+	}
+	b.broker = broker
+	if b.next != nil {
+		b.next.SetBroker(broker)
+	}
+}
 
 // Open builds the obs ext guest, opens an in-process engine session to it, and
 // returns the session plus an HTTP bridge that dispatches onto it. This is the
@@ -487,6 +501,8 @@ func (b *Bridge) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 		out, err := author.Call(ctx, b.session, ActorsMethod(), in)
 		writeJSON(w, out, err)
+	case path == "stream":
+		b.serveStream(w, r)
 	case path == "dashboard":
 		out, err := author.Call(ctx, b.session, DashboardMethod(), DashboardInput{})
 		if err != nil {
@@ -508,6 +524,37 @@ func writeJSON(w http.ResponseWriter, v any, err error) {
 		return
 	}
 	_ = json.NewEncoder(w).Encode(v)
+}
+
+func (b *Bridge) serveStream(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if b.broker == nil {
+		http.Error(w, "flow stream unavailable", http.StatusServiceUnavailable)
+		return
+	}
+	flusher, ok := w.(http.Flusher)
+	if !ok {
+		http.Error(w, "streaming unsupported", http.StatusInternalServerError)
+		return
+	}
+	w.Header().Set("Content-Type", "text/event-stream")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("Connection", "keep-alive")
+	w.WriteHeader(http.StatusOK)
+	flusher.Flush()
+
+	ch := b.broker.Subscribe(r.Context(), r.URL.Query().Get("severity"))
+	for ev := range ch {
+		data, err := json.Marshal(ev)
+		if err != nil {
+			continue
+		}
+		_, _ = fmt.Fprintf(w, "data: %s\n\n", data)
+		flusher.Flush()
+	}
 }
 
 const dashboardHTML = `<!doctype html>

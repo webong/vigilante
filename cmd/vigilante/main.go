@@ -394,26 +394,17 @@ func run(args []string, out io.Writer) error {
 	}
 
 	var remoteDecisions *decision.Set
-	var uplink *fleet.Uplink
 	if *serverURL != "" {
 		if *sensorKey == "" {
 			return fmt.Errorf("-sensor-key (or VIGILANTE_SENSOR_KEY) is required when -server is set")
 		}
-		remoteDecisions = decision.NewSet()
-		var uerr error
-		uplink, uerr = fleet.NewUplink(fleet.UplinkOptions{
-			ServerURL: *serverURL,
-			SensorKey: *sensorKey,
-			Insecure:  *serverInsecure,
-			Remote:    remoteDecisions,
-			OnError: func(err error) {
-				fmt.Fprintln(out, "[vigilante] fleet uplink:", err)
-			},
-		})
-		if uerr != nil {
-			return uerr
+		if _, err := fleet.ValidateServerURL(*serverURL, *serverInsecure); err != nil {
+			return err
 		}
-		fmt.Fprintf(out, "[vigilante] fleet sensor uplink configured -> %s\n", *serverURL)
+		if _, err := fleet.HashKey(*sensorKey); err != nil {
+			return err
+		}
+		remoteDecisions = decision.NewSet()
 	}
 
 	var store graph.Store
@@ -570,6 +561,26 @@ func run(args []string, out io.Writer) error {
 			fmt.Fprintf(out, "[vigilante] dynamic block threshold: %d %s+ verdicts/%s per source\n",
 				*blockThreshold, *blockMinSev, *blockWindow)
 		}
+	}
+
+	var uplink *fleet.Uplink
+	if *serverURL != "" {
+		var uerr error
+		uplink, uerr = fleet.NewUplink(fleet.UplinkOptions{
+			ServerURL: *serverURL,
+			SensorKey: *sensorKey,
+			Insecure:  *serverInsecure,
+			Remote:    remoteDecisions,
+			Local:     decisions,
+			Enforcer:  enforcer,
+			OnError: func(err error) {
+				fmt.Fprintln(out, "[vigilante] fleet uplink:", err)
+			},
+		})
+		if uerr != nil {
+			return uerr
+		}
+		fmt.Fprintf(out, "[vigilante] fleet sensor uplink configured -> %s\n", *serverURL)
 	}
 
 	// The action registry is the host's response authority. Only the ids in
@@ -784,6 +795,11 @@ func run(args []string, out io.Writer) error {
 	if historyStore != nil && *obsEnabled {
 		obsBridge = obs.NewExtensionBridge(obs.Extension{History: historyStore, Actions: registry, Token: *obsToken}, obsBridge)
 	}
+	var flowBroker *flow.Broker
+	if obsBridge != nil {
+		flowBroker = flow.NewBroker(64)
+		obsBridge.SetBroker(flowBroker)
+	}
 
 	// Operator console: the lookout ext plugin (web UI + console API at /lookout/)
 	// runs when a history store is present.
@@ -816,6 +832,9 @@ func run(args []string, out io.Writer) error {
 	var sinks []flow.Sink
 	if alertStore != nil {
 		sinks = append(sinks, flow.AlertSink{Store: alertStore}, actorIdx)
+	}
+	if flowBroker != nil {
+		sinks = append(sinks, flowBroker)
 	}
 	if historyStore != nil {
 		if *behaviorEnabled {
