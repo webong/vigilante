@@ -15,7 +15,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"html"
 	"net/http"
 	"strconv"
 	"strings"
@@ -165,14 +164,6 @@ type ActorsOutput struct {
 	Actors     []Actor `json:"actors"`
 }
 
-// DashboardInput is unused; present for contract completeness.
-type DashboardInput struct{}
-
-// DashboardOutput carries the rendered HTML.
-type DashboardOutput struct {
-	HTML string `json:"html"`
-}
-
 // Identity returns the pinned ext.plugin/v1 identity for the obs plugin.
 func Identity() engine.Identity {
 	return engine.Identity{ID: "vigilante/obs", Revision: "v1.0.0", Version: "1.0.0"}
@@ -207,14 +198,6 @@ func ActorsMethod() author.Method[ActorsInput, ActorsOutput] {
 	return author.Method[ActorsInput, ActorsOutput]{
 		Contract:  engine.ContractRef{Name: ContractName, Version: ContractVersion},
 		Operation: engine.Operation{Name: OpActors, Surface: "observation"},
-	}
-}
-
-// DashboardMethod returns the typed ext.plugin/v1 method for the dashboard op.
-func DashboardMethod() author.Method[DashboardInput, DashboardOutput] {
-	return author.Method[DashboardInput, DashboardOutput]{
-		Contract:  engine.ContractRef{Name: ContractName, Version: ContractVersion},
-		Operation: engine.Operation{Name: OpDashboard, Surface: "observation"},
 	}
 }
 
@@ -318,11 +301,6 @@ func (s *Service) Actors(_ context.Context, _ engine.Request, in ActorsInput) (A
 	return out, nil
 }
 
-// Dashboard implements OpDashboard.
-func (s *Service) Dashboard(_ context.Context, _ engine.Request, _ DashboardInput) (DashboardOutput, error) {
-	return DashboardOutput{HTML: s.renderDashboard()}, nil
-}
-
 // BuildGuest constructs the ext.plugin/v1 Guest for the obs plugin: it
 // registers the typed operations on a Descriptor and returns the guest plus
 // descriptor, ready to back an in-process engine session (or be served over
@@ -347,9 +325,6 @@ func BuildGuest(svc *Service) (engine.Descriptor, *engine.Guest, error) {
 	if err := author.Register(reg, ActorsMethod(), svc.Actors); err != nil {
 		return engine.Descriptor{}, nil, err
 	}
-	if err := author.Register(reg, DashboardMethod(), svc.Dashboard); err != nil {
-		return engine.Descriptor{}, nil, err
-	}
 	desc, opts, err := reg.Snapshot(author.Options{
 		Authorize:       func(context.Context, engine.Request) error { return nil },
 		MaxCallDuration: 10 * time.Second,
@@ -364,36 +339,6 @@ func BuildGuest(svc *Service) (engine.Descriptor, *engine.Guest, error) {
 	return desc, guest, nil
 }
 
-// renderDashboard builds the self-contained HTML status page.
-func (s *Service) renderDashboard() string {
-	var rows, counts strings.Builder
-	if s.reader != nil {
-		bySev := s.reader.CountBySeverity()
-		for _, sev := range []alert.Severity{alert.SeverityCritical, alert.SeverityHigh, alert.SeverityMedium, alert.SeverityLow, alert.SeverityInfo} {
-			if n := bySev[sev]; n > 0 {
-				fmt.Fprintf(&counts, "<span class='pill sev %s'>%s %d</span>", sev, sev, n)
-			}
-		}
-		if recs, err := s.reader.Recent("", 50); err == nil {
-			for _, rec := range recs {
-				ts := rec.Timestamp
-				if ts.IsZero() {
-					ts = time.Now()
-				}
-				fmt.Fprintf(&rows,
-					"<tr><td class='sev %s'>%s</td><td>%s</td><td class='m'>%s</td><td>%s</td><td class='t'>%s</td></tr>",
-					esc(string(rec.Severity)), esc(string(rec.Severity)),
-					esc(rec.Action), esc(rec.Method+" "+rec.Path),
-					esc(rec.SrcAddr), esc(ts.Format("15:04:05")))
-			}
-		}
-	}
-	if rows.Len() == 0 {
-		rows.WriteString("<tr><td colspan='5' class='empty'>no alerts yet</td></tr>")
-	}
-	return fmt.Sprintf(dashboardHTML, counts.String(), rows.String())
-}
-
 // Bridge exposes the obs plugin over HTTP by dispatching requests onto a live
 // engine.Session running the obs plugin. This is the host-side seam: it maps
 // HTTP paths to the plugin's typed operations rather than reimplementing
@@ -403,7 +348,9 @@ func (s *Service) renderDashboard() string {
 //
 //	"" | summary   -> session call obs summary
 //	alerts         -> session call obs alerts (?severity=&limit=)
-//	dashboard      -> session call obs dashboard (HTML)
+//	actions        -> session call obs actions
+//	actors         -> session call obs actors (?suspicious=&limit=)
+//	stream         -> SSE event stream (?severity=)
 type Bridge struct {
 	session   *engine.Session
 	extension Extension
@@ -477,7 +424,7 @@ func (b *Bridge) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	path := strings.Trim(strings.TrimPrefix(r.URL.Path, "/"), "/")
 	switch {
-	case path == "" || path == "summary" || path == "dashboard" && r.URL.Query().Get("format") == "json":
+	case path == "" || path == "summary":
 		out, err := author.Call(ctx, b.session, SummaryMethod(), SummaryInput{})
 		writeJSON(w, out, err)
 	case path == "alerts":
@@ -503,14 +450,6 @@ func (b *Bridge) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, out, err)
 	case path == "stream":
 		b.serveStream(w, r)
-	case path == "dashboard":
-		out, err := author.Call(ctx, b.session, DashboardMethod(), DashboardInput{})
-		if err != nil {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
-			return
-		}
-		w.Header().Set("Content-Type", "text/html; charset=utf-8")
-		_, _ = w.Write([]byte(out.HTML))
 	default:
 		http.NotFound(w, r)
 	}
@@ -556,33 +495,3 @@ func (b *Bridge) serveStream(w http.ResponseWriter, r *http.Request) {
 		flusher.Flush()
 	}
 }
-
-const dashboardHTML = `<!doctype html>
-<html lang="en"><head><meta charset="utf-8">
-<meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Vigilante</title>
-<style>
-:root{--bg:#0e1116;--fg:#e6edf3;--mut:#8b949e;--card:#161b22;--line:#30363d}
-*{box-sizing:border-box}
-body{margin:0;font:14px/1.5 -apple-system,Segoe UI,Roboto,sans-serif;background:var(--bg);color:var(--fg)}
-header{padding:16px 20px;border-bottom:1px solid var(--line);display:flex;gap:12px;align-items:center}
-h1{font-size:16px;margin:0;font-weight:600}
-main{padding:20px}
-.pill{padding:3px 9px;border-radius:999px;font-size:12px;background:var(--card);border:1px solid var(--line);margin-right:6px}
-.sev.critical{color:#ff7b72}.sev.high{color:#ffa657}.sev.medium{color:#e3b341}.sev.low{color:#7ee787}.sev.info{color:#79c0ff}
-table{width:100%%;border-collapse:collapse;background:var(--card);border:1px solid var(--line);border-radius:8px;overflow:hidden}
-th,td{text-align:left;padding:8px 12px;border-bottom:1px solid var(--line);font-size:13px}
-th{color:var(--mut);font-weight:600;text-transform:uppercase;font-size:11px;letter-spacing:.05em}
-td.m{font-family:ui-monospace,SFMono-Regular,Menlo,monospace}
-td.t{color:var(--mut)}
-.empty{color:var(--mut);text-align:center;padding:24px}
-a{color:#58a6ff}
-</style></head><body>
-<header><h1>Vigilante</h1><div>%s</div>
-<div style="margin-left:auto"><a href="alerts">alerts</a> · <a href="summary">summary</a> · <a href="/metrics">metrics</a></div></header>
-<main>
-<table><thead><tr><th>Severity</th><th>Action</th><th>Request</th><th>Source</th><th>Time</th></tr></thead>
-<tbody>%s</tbody></table>
-</main></body></html>`
-
-func esc(s string) string { return html.EscapeString(s) }

@@ -41,7 +41,8 @@ that renders pixels is a consumer, not the core.
 | `GET /obs/actors?suspicious=&limit=` | Actors aggregated from flows: key, first/last seen, counts, verdicts, tags, decaying risk. |
 | `GET /metrics` | Prometheus text: queue, redaction, alert, and severity counters. |
 | `GET /healthz` / `/ready` | Liveness and readiness. |
-| `GET /obs/dashboard` | A **sample** HTML page that renders `/obs/alerts`. Not the product. |
+| `GET /obs/stream` | Server-Sent Events stream of live flows (?severity=). |
+| `GET /lookout/` | Operator console SPA (ext.plugin/v1 vigilante.lookout@v1). |
 
 **RPC (`ext.plugin/v1`)** for programs and out-of-process consumers:
 
@@ -127,11 +128,11 @@ drop events locally without backpressuring the publisher or other consumers.
 | Alert/summary read | `ext/obs/obs.go` |
 | Actors read | `ext/obs/obs.go` (`ActorsOutput`), `internal/actor`, `cmd/vigilante/main.go` (`actorView`) |
 | RPC contracts | `ext/obs`, `ext/agent`, `internal/flow` |
-| Sample dashboard | `ext/obs/obs.go` (`renderDashboard`) — disposable |
+| SSE stream | `ext/obs/obs.go` (`serveStream`), `internal/flow/stream.go` (`Broker`) |
+| Operator console UI | `ext/lookout` (SPA at `/lookout/`) |
 
 ## Non-goals
 
 - Shipping a production dashboard, charting, or alerting UI.
 - Operator authentication (tracked for the write path).
-- Real-time push/streaming transport.
 - A query language; filters are endpoint parameters for now.

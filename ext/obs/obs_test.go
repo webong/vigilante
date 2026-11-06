@@ -106,18 +106,6 @@ func TestExtPluginEndToEnd(t *testing.T) {
 	}
 	defer func() { _ = closeFn(ctx) }()
 
-	t.Run("dashboard HTML via session", func(t *testing.T) {
-		rr := httptest.NewRecorder()
-		bridge.ServeHTTP(rr, httptest.NewRequest(http.MethodGet, "/dashboard", nil))
-		if rr.Code != http.StatusOK {
-			t.Fatalf("status = %d", rr.Code)
-		}
-		body := rr.Body.String()
-		if !strings.Contains(body, "<!doctype html>") || !strings.Contains(body, "critical") {
-			t.Fatalf("dashboard HTML missing content: %.200s", body)
-		}
-	})
-
 	t.Run("alerts JSON via session", func(t *testing.T) {
 		rr := httptest.NewRecorder()
 		bridge.ServeHTTP(rr, httptest.NewRequest(http.MethodGet, "/alerts?limit=10", nil))
@@ -240,8 +228,8 @@ func TestBuildGuestDescriptor(t *testing.T) {
 	found := false
 	for _, c := range desc.Contracts {
 		if c.Name == ContractName && c.Version == ContractVersion {
-			if len(c.Operations) != 5 {
-				t.Fatalf("ops = %d, want 5", len(c.Operations))
+			if len(c.Operations) != 4 {
+				t.Fatalf("ops = %d, want 4", len(c.Operations))
 			}
 			found = true
 		}
