@@ -9,7 +9,8 @@ were rejected — so a future reader can tell whether a constraint still applies
 | [0001](0001-stateless-core-stateful-plugins.md) | Keep the core stateless; publish flows to plugins and enforce from a TTL snapshot | Accepted |
 | [0002](0002-open-ended-action-contract.md) | Open-ended actions behind a host-owned contract with allowlist, TTL, audit, and revert | Accepted |
 | [0003](0003-api-first-data-not-ui.md) | Offer data over REST and RPC; ship no UI | Accepted |
-| [0004](0004-sensor-server-split.md) | Split sensors from a central server; keep per-flow triage and its context at the edge | Proposed |
+| [0004](0004-sensor-server-split.md) | Split sensors from a central server; keep per-flow triage and its context at the edge | Accepted |
+| [0005](0005-lookout-console-plugin.md) | Extract the Lookout operator console as an `ext.plugin/v1` plugin | Accepted |
 
 ## Writing a new ADR
 
