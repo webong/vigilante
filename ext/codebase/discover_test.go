@@ -1,4 +1,4 @@
-package repo
+package codebase
 
 import (
 	"context"
@@ -60,7 +60,6 @@ func TestSourceRootFromWalksUp(t *testing.T) {
 }
 
 func TestDiscoverRootNoPortYieldsEmpty(t *testing.T) {
-	// A URL with no discoverable listening process must yield "" (no guess).
 	if got := DiscoverRoot(context.Background(), "https://example.com"); got != "" {
 		t.Errorf("DiscoverRoot(no local port) = %q, want empty", got)
 	}

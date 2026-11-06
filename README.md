@@ -34,7 +34,7 @@ after renaming the executable to `vigilante.exe`.
 Try the built-in demonstration:
 
 ```sh
-vigilante demo -repo ""
+vigilante demo
 ```
 
 It runs a sample app, sends example requests, and prints the results. No agent

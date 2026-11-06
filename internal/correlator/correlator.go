@@ -21,7 +21,6 @@ import (
 	"github.com/webong/vigilante/ext/agent"
 	"github.com/webong/vigilante/internal/deps"
 	"github.com/webong/vigilante/internal/redact"
-	"github.com/webong/vigilante/internal/repo"
 	"github.com/webong/vigilante/internal/schema"
 )
 
@@ -37,7 +36,7 @@ type ProcessEntry struct {
 type Options struct {
 	SystemGraph *system.Graph
 	Gateway     *agent.Gateway
-	Repo        *repo.Index
+	Repo        agent.CodebaseService
 	CacheTTL    time.Duration
 	// FallbackPID is used when inspecting a local process in environments where
 	// the target port belongs to the current or child process.
@@ -55,7 +54,7 @@ type Correlator struct {
 	sysGraph       *system.Graph
 	store          graph.Store
 	gateway        *agent.Gateway
-	repoIdx        *repo.Index
+	repoIdx        agent.CodebaseService
 	cacheTTL       time.Duration
 	fallbackPID    int
 	workingDir     string
@@ -233,6 +232,9 @@ func (c *Correlator) buildCodebaseContext(ev agent.PacketEvent) *agent.CodebaseC
 		return nil
 	}
 	snap := c.repoIdx.Snapshot()
+	if snap.Source == "" && snap.LocalRoot == "" && snap.FileCount == 0 {
+		return nil
+	}
 	ctx := &agent.CodebaseContext{
 		Source:     snap.Source,
 		Commit:     snap.Commit,

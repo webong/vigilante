@@ -14,14 +14,13 @@ import (
 	"github.com/webong/ext/pkg/ext-go/engine/transport/jsonline"
 	"github.com/webong/ext/res/system/graph"
 	"github.com/webong/ext/res/system/supervisor"
-	"github.com/webong/vigilante/internal/repo"
 )
 
 // SupervisedOptions configures an out-of-process agent managed by
 // github.com/webong/ext/res/system/supervisor and connected over jsonline IPC.
 type SupervisedOptions struct {
 	Store           graph.Store
-	Repo            *repo.Index
+	Repo            SourceReader
 	Command         string
 	Args            []string
 	Environment     map[string]string

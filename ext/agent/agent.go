@@ -28,7 +28,6 @@ import (
 	"github.com/webong/ext/res/system/network"
 	"github.com/webong/vigilante/internal/deps"
 	"github.com/webong/vigilante/internal/redact"
-	"github.com/webong/vigilante/internal/repo"
 )
 
 const (
@@ -117,17 +116,63 @@ type ServerProcessContext struct {
 	MappedLibs  []string `json:"mapped_libs,omitempty"`
 }
 
+// RouteHandler represents an HTTP/RPC route endpoint discovered in source code.
+type RouteHandler struct {
+	Method  string `json:"method,omitempty"`
+	Pattern string `json:"pattern"`
+	Handler string `json:"handler,omitempty"`
+	File    string `json:"file"`
+	Line    int    `json:"line"`
+}
+
+// CodeSink represents a security-sensitive operation (SQL query, file read,
+// command execution) discovered in the codebase.
+type CodeSink struct {
+	Category string `json:"category"`
+	Symbol   string `json:"symbol"`
+	File     string `json:"file"`
+	Line     int    `json:"line"`
+	Snippet  string `json:"snippet"`
+}
+
+// CodebaseSnapshot summarizes an indexed codebase.
+type CodebaseSnapshot struct {
+	Source     string         `json:"source"`
+	LocalRoot  string         `json:"local_root"`
+	Commit     string         `json:"commit,omitempty"`
+	TreeDigest string         `json:"tree_digest"`
+	FileCount  int            `json:"file_count"`
+	Languages  []string       `json:"languages,omitempty"`
+	Routes     []RouteHandler `json:"routes,omitempty"`
+	Sinks      []CodeSink     `json:"sinks,omitempty"`
+}
+
+// SourceReader is implemented by an optional codebase mapping plugin (such as
+// ext/codebase) to serve vigilante.host@v1/read-source reverse calls.
+type SourceReader interface {
+	ReadSnippet(relPath string, startLine, endLine int) (string, error)
+}
+
+// CodebaseService is implemented by an optional codebase mapping plugin (such
+// as ext/codebase). When nil, Vigilante enriches flows without source/route
+// mapping.
+type CodebaseService interface {
+	SourceReader
+	Snapshot() CodebaseSnapshot
+	MatchRoute(method, reqPath string) (RouteHandler, bool)
+}
+
 // CodebaseContext summarizes the target repository or codebase pointed to by
 // vigilante (-repo), including the matched route handler and relevant code sinks.
 type CodebaseContext struct {
-	Source         string             `json:"source"`
-	Commit         string             `json:"commit,omitempty"`
-	TreeDigest     string             `json:"tree_digest"`
-	FileCount      int                `json:"file_count"`
-	Languages      []string           `json:"languages,omitempty"`
-	MatchedRoute   *repo.RouteHandler `json:"matched_route,omitempty"`
-	RelevantSinks  []repo.CodeSink    `json:"relevant_sinks,omitempty"`
-	SourceExcerpts []SourceExcerpt    `json:"source_excerpts,omitempty"`
+	Source         string          `json:"source"`
+	Commit         string          `json:"commit,omitempty"`
+	TreeDigest     string          `json:"tree_digest"`
+	FileCount      int             `json:"file_count"`
+	Languages      []string        `json:"languages,omitempty"`
+	MatchedRoute   *RouteHandler   `json:"matched_route,omitempty"`
+	RelevantSinks  []CodeSink      `json:"relevant_sinks,omitempty"`
+	SourceExcerpts []SourceExcerpt `json:"source_excerpts,omitempty"`
 }
 
 // SourceExcerpt is bounded source context collected on the host so a remote
@@ -360,7 +405,7 @@ func ServeStdio(ctx context.Context, conn io.ReadWriteCloser, handler Handler) e
 
 // BuildHostReverseOptions builds the ReverseOptions that allow an agent to call
 // vigilante.host@v1/query-graph, read-source, and lookup-advisories during triage.
-func BuildHostReverseOptions(store graph.Store, repoIdx *repo.Index) *engine.ReverseOptions {
+func BuildHostReverseOptions(store graph.Store, repoIdx SourceReader) *engine.ReverseOptions {
 	if store == nil && repoIdx == nil {
 		return nil
 	}
@@ -467,7 +512,7 @@ type Gateway struct {
 
 // NewInProcessGateway constructs an in-process ext.plugin/v1 guest and opens a
 // verified host session with reverse graph, codebase, and advisory access.
-func NewInProcessGateway(ctx context.Context, store graph.Store, repoIdx *repo.Index, handler Handler) (*Gateway, error) {
+func NewInProcessGateway(ctx context.Context, store graph.Store, repoIdx SourceReader, handler Handler) (*Gateway, error) {
 	desc, guest, err := BuildGuest(handler)
 	if err != nil {
 		return nil, err

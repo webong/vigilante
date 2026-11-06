@@ -1,4 +1,4 @@
-package repo
+package codebase
 
 import (
 	"context"
@@ -172,7 +172,6 @@ func TestOpenLocalGitClone(t *testing.T) {
 	run("add", ".")
 	run("commit", "-q", "-m", "init")
 
-	// file:// forces a real (non-hardlink) clone through the remote code path.
 	idx, err := OpenWithOptions(context.Background(), "file://"+srcDir, Options{})
 	if err != nil {
 		t.Fatalf("Open(file:// clone): %v", err)
@@ -195,7 +194,6 @@ func TestOpenCloneAuthHint(t *testing.T) {
 	if _, err := exec.LookPath("git"); err != nil {
 		t.Skip("git not available")
 	}
-	// An unreachable https remote fails fast; the error must be actionable.
 	_, err := OpenWithOptions(context.Background(), "https://vigilante.invalid/private/repo.git", Options{})
 	if err == nil {
 		t.Fatal("expected clone of unreachable host to fail")

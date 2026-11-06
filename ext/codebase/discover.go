@@ -1,4 +1,4 @@
-package repo
+package codebase
 
 import (
 	"context"
@@ -11,13 +11,13 @@ import (
 )
 
 // DiscoverRoot infers the source root for a target service so Vigilante can
-// index its codebase without an explicit -repo. It maps the target's port to a
-// listening process (via ext/res/system), then walks that process's open-file
-// descriptors looking for a directory that looks like a source checkout (has a
-// .git dir or a recognizable project manifest).
+// index its codebase when -repo auto is configured. It maps the target's port
+// to a listening process (via ext/res/system), then walks that process's
+// open-file descriptors looking for a directory that looks like a source
+// checkout (has a .git dir or a recognizable project manifest).
 //
-// It returns "" when nothing is confidently found, so callers keep their
-// configured -repo. It is deliberately conservative: it never guesses.
+// It returns "" when nothing is confidently found. It is deliberately
+// conservative: it never guesses.
 func DiscoverRoot(ctx context.Context, target string) string {
 	port := portOf(target)
 	if port == "" {
@@ -34,7 +34,6 @@ func DiscoverRoot(ctx context.Context, target string) string {
 	if err != nil || len(snap.Processes) == 0 {
 		return ""
 	}
-	// Collect candidate directories from the process's open files, cwd first.
 	var cands []string
 	for _, r := range snap.Processes[0].Resources {
 		if r.Kind != "file" || r.Path == "" {
@@ -59,10 +58,6 @@ func DiscoverRoot(ctx context.Context, target string) string {
 	return ""
 }
 
-// listeningPIDForPort returns the PID of a process listening on the given port,
-// or 0 if none is visible to the current user. It enumerates caller-visible
-// processes, then inspects the most recently started candidates (typical for
-// local dev/app servers) for a listening socket on the port.
 func listeningPIDForPort(ctx context.Context, port string) int {
 	all, err := system.DiscoverProcesses(ctx, system.ProcessOptions{MaxProcesses: 1024, Timeout: 3 * time.Second})
 	if err != nil {
@@ -87,7 +82,6 @@ func listeningPIDForPort(ctx context.Context, port string) int {
 	return 0
 }
 
-// processListensOn reports whether p has a listening socket resource on port.
 func processListensOn(p system.ProcessInfo, port string) bool {
 	for _, r := range p.Resources {
 		if r.Kind != "socket" {
@@ -103,11 +97,9 @@ func processListensOn(p system.ProcessInfo, port string) bool {
 	return false
 }
 
-// sourceRootFrom walks up from dir to find the nearest source-checkout root
-// (a directory containing .git or a project manifest). Returns "" if none.
 func sourceRootFrom(dir string) string {
 	cur := dir
-	for i := 0; i < 6; i++ { // bound the walk
+	for i := 0; i < 6; i++ {
 		if isSourceRoot(cur) {
 			return cur
 		}
@@ -120,7 +112,6 @@ func sourceRootFrom(dir string) string {
 	return ""
 }
 
-// isSourceRoot reports whether dir looks like the root of a source checkout.
 func isSourceRoot(dir string) bool {
 	if st, err := os.Stat(filepath.Join(dir, ".git")); err == nil && (st.IsDir() || st.Mode().IsRegular()) {
 		return true
@@ -136,21 +127,17 @@ func isSourceRoot(dir string) bool {
 	return false
 }
 
-// portOf extracts the port from "host:port", a URL host, or a bare port.
 func portOf(addr string) string {
 	addr = strings.TrimSpace(addr)
 	if addr == "" {
 		return ""
 	}
-	// Strip scheme if a URL was passed (http://host:port/path).
 	if i := strings.Index(addr, "://"); i >= 0 {
 		addr = addr[i+3:]
 	}
-	// Strip any path component.
 	if i := strings.IndexByte(addr, '/'); i >= 0 {
 		addr = addr[:i]
 	}
-	// host:port -> the part after the last ':' if numeric.
 	if i := strings.LastIndexByte(addr, ':'); i >= 0 {
 		if p := addr[i+1:]; isDigits(p) {
 			return p

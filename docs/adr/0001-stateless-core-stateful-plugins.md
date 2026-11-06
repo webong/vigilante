@@ -142,8 +142,9 @@ snapshot. See [ADR 0002](0002-open-ended-action-contract.md).
 | Policy + snapshot composition | `internal/gate/gate.go` |
 | Action authority | `internal/action/registry.go` |
 | Durable flow/actor history (off-path sink) | `internal/history`, `internal/behavior` |
+| Codebase mapping plugin (detachable) | `ext/codebase` (`vigilante.codebase@v1`) |
 | LLM actor triage plugin | `ext/triage` (`vigilante.triage@v1`) |
-| Wiring | `cmd/vigilante/main.go` |
+| Wiring | `cmd/vigilante/main.go`, `cmd/vigilante/extensions.go` |
 
 ## Amendment 2026-10-30: off-path state is core
 
@@ -162,10 +163,12 @@ The amendment narrows the rule:
   in `ext/` only when it sits behind a versioned contract and an
   `engine.Session`, so it can be replaced or run out of process without a core
   release. Today that is `vigilante.agent@v1` (flow triage),
-  `vigilante.obs@v1` (data API and dashboard), `vigilante.triage@v1`
-  (LLM actor triage), and `vigilante.action@v1` (third-party action
-  executors). Packages split out only for separation of concerns belong
-  in `internal/` (or `pkg/` when meant to be imported).
+  `vigilante.codebase@v1` (detachable codebase & route mapping),
+  `vigilante.obs@v1` (data API and dashboard), `vigilante.lookout@v1`
+  (operator console), `vigilante.triage@v1` (LLM actor triage), and
+  `vigilante.action@v1` (third-party action executors). Packages split out only
+  for separation of concerns belong in `internal/` (or `pkg/` when meant to be
+  imported).
 
 A component is a plugin when it is swappable by nature: it calls a model or
 vendor, its output is non-deterministic, or operators are expected to bring

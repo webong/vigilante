@@ -105,7 +105,7 @@ func TestLoadConfigJSON(t *testing.T) {
 		t.Fatal(err)
 	}
 	if cfg.Mode != "http" || cfg.Listen != ":9000" || cfg.Target != "http://app:3000" ||
-		cfg.Repo != "owner/repo" || cfg.QueueSize != 64 || !cfg.Supervised {
+		codebaseConfig(cfg).Repo != "owner/repo" || cfg.QueueSize != 64 || !cfg.Supervised {
 		t.Fatalf("cfg = %+v", cfg)
 	}
 }
@@ -567,5 +567,98 @@ func TestFleetConfigKeys(t *testing.T) {
 	}
 	if cfg.ServerInsecure == nil || !*cfg.ServerInsecure {
 		t.Errorf("server_insecure = %v, want true", cfg.ServerInsecure)
+	}
+}
+
+func TestCodebaseExtConfigYAMLandJSON(t *testing.T) {
+	yamlPath := filepath.Join(t.TempDir(), "cb.yaml")
+	yamlData := "" +
+		"mode: http\n" +
+		"codebase:\n" +
+		"  enabled: true\n" +
+		"  repo: gitlab.com/org/service\n" +
+		"  ref: release-2\n" +
+		"  user: oauth2\n" +
+		"  token: glpat-secret\n" +
+		"  ssh_key: /etc/vigilante/id_ed25519\n" +
+		"  plugin: /opt/vigilante/codebase-worker\n"
+	if err := os.WriteFile(yamlPath, []byte(yamlData), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := loadConfig(yamlPath)
+	if err != nil {
+		t.Fatalf("yaml codebase block: %v", err)
+	}
+	cb := codebaseConfig(cfg)
+	if cb.Enabled == nil || !*cb.Enabled || cb.Repo != "gitlab.com/org/service" || cb.Ref != "release-2" ||
+		cb.User != "oauth2" || cb.Token != "glpat-secret" || cb.SSHKey != "/etc/vigilante/id_ed25519" ||
+		cb.Plugin != "/opt/vigilante/codebase-worker" {
+		t.Fatalf("unexpected yaml codebase config: %+v", cb)
+	}
+
+	jsonPath := filepath.Join(t.TempDir(), "cb.json")
+	jsonData := `{"mode":"http","codebase":{"enabled":false,"repo":"owner/repo","ref":"main"}}`
+	if err := os.WriteFile(jsonPath, []byte(jsonData), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err = loadConfig(jsonPath)
+	if err != nil {
+		t.Fatalf("json codebase block: %v", err)
+	}
+	cb = codebaseConfig(cfg)
+	if cb.Enabled == nil || *cb.Enabled || cb.Repo != "owner/repo" || cb.Ref != "main" {
+		t.Fatalf("unexpected json codebase config: %+v", cb)
+	}
+}
+
+func TestCodebaseExtConfigMerge(t *testing.T) {
+	dir := t.TempDir()
+	base := filepath.Join(dir, "base.yaml")
+	overlay := filepath.Join(dir, "overlay.yaml")
+	if err := os.WriteFile(base, []byte("codebase:\n  repo: owner/old\n  ref: v1\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(overlay, []byte("codebase: false\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := loadConfigs([]string{base, overlay})
+	if err != nil {
+		t.Fatal(err)
+	}
+	cb := codebaseConfig(cfg)
+	if cb.Enabled == nil || *cb.Enabled || cb.Repo != "" || cb.Ref != "" {
+		t.Fatalf("expected codebase section replacement, got %+v", cb)
+	}
+}
+
+func TestDetachedCodebaseExtRejectsConfigAndFlags(t *testing.T) {
+	featureExtMu.Lock()
+	saved := featureExts
+	featureExts = nil
+	featureExtMu.Unlock()
+	defer func() {
+		featureExtMu.Lock()
+		featureExts = saved
+		featureExtMu.Unlock()
+	}()
+
+	yamlPath := filepath.Join(t.TempDir(), "detached.yaml")
+	if err := os.WriteFile(yamlPath, []byte("mode: http\nrepo: owner/repo\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := loadConfig(yamlPath); err == nil || !strings.Contains(err.Error(), "unknown key") {
+		t.Fatalf("expected unknown key error when codebase ext is detached, got %v", err)
+	}
+
+	jsonPath := filepath.Join(t.TempDir(), "detached.json")
+	if err := os.WriteFile(jsonPath, []byte(`{"mode":"http","codebase":"owner/repo"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := loadConfig(jsonPath); err == nil {
+		t.Fatal("expected JSON unknown field error when codebase ext is detached")
+	}
+
+	if err := run([]string{"-mode", "demo", "-repo", "."}, &bytes.Buffer{}); err == nil || !strings.Contains(err.Error(), "flag provided but not defined: -repo") {
+		t.Fatalf("expected undefined -repo flag when codebase ext is detached, got %v", err)
 	}
 }

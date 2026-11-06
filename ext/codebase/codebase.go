@@ -1,12 +1,16 @@
-// Package repo clones or indexes a local directory or any remote Git repository
-// (any host: GitHub, GitLab, Bitbucket, Gitea, self-hosted, ssh://, scp-like
-// git@host:path, file://, local paths) so that mirrored network flows can be
-// correlated directly with source files, route handlers, and security-sensitive
-// code sinks, and so the agent can read source files on demand over
-// ext.plugin/v1 reverse host calls. Private repositories are supported through
-// HTTPS tokens (via a private GIT_ASKPASS helper), configured git credential
-// helpers, or ssh-agent.
-package repo
+// Package codebase is Vigilante's detachable codebase mapping extension
+// (ext.plugin/v1 contract vigilante.codebase@v1).
+//
+// It clones or indexes a local directory or any remote Git repository (GitHub,
+// GitLab, Bitbucket, Gitea, self-hosted, ssh://, scp-like git@host:path,
+// file://, local paths) so that mirrored network flows can be correlated with
+// source files, route handlers, and security-sensitive code sinks, and so
+// agents can read source snippets on demand over reverse host calls.
+//
+// In addition to its plugin session contract (in-process or supervised out of
+// process), this package brings its own CLI flag and YAML/JSON configuration
+// support to Vigilante when attached.
+package codebase
 
 import (
 	"bufio"
@@ -25,6 +29,8 @@ import (
 	"sort"
 	"strings"
 	"time"
+
+	"github.com/webong/vigilante/ext/agent"
 )
 
 const (
@@ -33,35 +39,14 @@ const (
 )
 
 // RouteHandler represents an HTTP/RPC route endpoint discovered in source code.
-type RouteHandler struct {
-	Method  string `json:"method,omitempty"` // "GET", "POST", "ANY", etc.
-	Pattern string `json:"pattern"`          // e.g. "/api/v1/files"
-	Handler string `json:"handler,omitempty"`
-	File    string `json:"file"` // slash-separated relative path
-	Line    int    `json:"line"`
-}
+type RouteHandler = agent.RouteHandler
 
 // CodeSink represents a security-sensitive operation (SQL query, file read,
 // command execution) discovered in the codebase.
-type CodeSink struct {
-	Category string `json:"category"` // "filesystem", "sql", "exec", "deserialization"
-	Symbol   string `json:"symbol"`   // e.g. "os.Open", "db.Query", "exec.Command"
-	File     string `json:"file"`
-	Line     int    `json:"line"`
-	Snippet  string `json:"snippet"`
-}
+type CodeSink = agent.CodeSink
 
 // Snapshot summarizes the indexed codebase for the agent.
-type Snapshot struct {
-	Source     string         `json:"source"`     // Original URL or path passed to -repo
-	LocalRoot  string         `json:"local_root"` // Local filesystem checkout path
-	Commit     string         `json:"commit,omitempty"`
-	TreeDigest string         `json:"tree_digest"` // Deterministic SHA-256 over indexed files
-	FileCount  int            `json:"file_count"`
-	Languages  []string       `json:"languages,omitempty"`
-	Routes     []RouteHandler `json:"routes,omitempty"`
-	Sinks      []CodeSink     `json:"sinks,omitempty"`
-}
+type Snapshot = agent.CodebaseSnapshot
 
 // Index holds the indexed codebase and allows safe, root-jailed source reading.
 type Index struct {
@@ -185,7 +170,6 @@ func cloneRemote(ctx context.Context, target string, opts Options) (string, func
 			user = defaultTokenUser(cloneURL)
 		}
 		if runtime.GOOS == "windows" {
-			// No portable /bin/sh for a helper script: embed credentials in the URL.
 			if u, uerr := url.Parse(cloneURL); uerr == nil && u.User == nil {
 				u.User = url.UserPassword(user, token)
 				cloneURL = u.String()
@@ -198,8 +182,6 @@ func cloneRemote(ctx context.Context, target string, opts Options) (string, func
 				return "", nil, fmt.Errorf("create askpass helper: %w", serr)
 			}
 			askPassCleanup = scleanup
-			// Disable configured credential helpers so the explicit token wins,
-			// and keep the token out of argv/.git/config via the helper env.
 			args = append([]string{"-c", "credential.helper="}, args...)
 			env = append(env,
 				"GIT_ASKPASS="+script,
@@ -229,7 +211,11 @@ func (idx *Index) Snapshot() Snapshot {
 	if idx == nil {
 		return Snapshot{}
 	}
-	s := idx.snapshot
+	return cloneSnapshot(idx.snapshot)
+}
+
+func cloneSnapshot(snap Snapshot) Snapshot {
+	s := snap
 	s.Languages = append([]string(nil), s.Languages...)
 	s.Routes = append([]RouteHandler(nil), s.Routes...)
 	s.Sinks = append([]CodeSink(nil), s.Sinks...)
@@ -241,6 +227,13 @@ func (idx *Index) MatchRoute(method, reqPath string) (RouteHandler, bool) {
 	if idx == nil || reqPath == "" {
 		return RouteHandler{}, false
 	}
+	return matchRouteInSlice(idx.snapshot.Routes, method, reqPath)
+}
+
+func matchRouteInSlice(routes []RouteHandler, method, reqPath string) (RouteHandler, bool) {
+	if reqPath == "" {
+		return RouteHandler{}, false
+	}
 	if qIdx := strings.IndexByte(reqPath, '?'); qIdx >= 0 {
 		reqPath = reqPath[:qIdx]
 	}
@@ -249,7 +242,7 @@ func (idx *Index) MatchRoute(method, reqPath string) (RouteHandler, bool) {
 	var best RouteHandler
 	bestScore := -1
 
-	for _, r := range idx.snapshot.Routes {
+	for _, r := range routes {
 		if !routeMatchesPath(r.Pattern, reqPath) {
 			continue
 		}
@@ -332,26 +325,18 @@ func (idx *Index) Close() error {
 	return idx.cleanup()
 }
 
-// normalizeRepoURL resolves a target string into a concrete Git remote URL for
-// any host: full URLs (https://, ssh://, git://, file://) and scp-like
-// git@host:path pass through unchanged; "host/owner/repo" shorthands (with a
-// dotted host, e.g. gitlab.com/group/project) become https URLs; bare
-// "owner/repo" shorthand maps to VIGILANTE_GIT_HOST (default github.com).
 func normalizeRepoURL(target string) string {
 	target = strings.TrimRight(strings.TrimSpace(target), "/")
 	if target == "" {
 		return target
 	}
-	// Full URL (https/ssh/git/file/...) or scp-like git@host:path.
 	if strings.Contains(target, "://") || strings.HasPrefix(target, "git@") {
 		return target
 	}
 	parts := strings.Split(target, "/")
-	// host/owner/repo shorthand for any host, e.g. "gitlab.com/group/project".
 	if len(parts) == 3 && strings.Contains(parts[0], ".") && !strings.HasPrefix(parts[0], ".") && parts[0] != "" {
 		return "https://" + target
 	}
-	// owner/repo shorthand -> configurable default host.
 	if len(parts) == 2 && parts[0] != "" && parts[1] != "" &&
 		!strings.HasPrefix(parts[0], ".") && !strings.HasPrefix(parts[0], "/") {
 		return "https://" + defaultRepoHost() + "/" + target
@@ -359,7 +344,6 @@ func normalizeRepoURL(target string) string {
 	return target
 }
 
-// defaultRepoHost returns the host used for bare owner/repo shorthands.
 func defaultRepoHost() string {
 	if host := strings.TrimSpace(os.Getenv("VIGILANTE_GIT_HOST")); host != "" {
 		return strings.TrimRight(host, "/")
@@ -367,22 +351,14 @@ func defaultRepoHost() string {
 	return "github.com"
 }
 
-// isHTTPSRemote reports whether a remote URL uses the https scheme.
 func isHTTPSRemote(remote string) bool {
 	return strings.HasPrefix(remote, "https://")
 }
 
-// isSSHRemote reports whether a remote URL uses the ssh transport
-// (ssh:// scheme or scp-like git@host:path syntax).
 func isSSHRemote(remote string) bool {
 	return strings.HasPrefix(remote, "ssh://") || strings.HasPrefix(remote, "git@")
 }
 
-// buildSSHCommand assembles GIT_SSH_COMMAND for ssh remotes, optionally forcing
-// a specific private key (Options.SSHKey) with IdentitiesOnly and non-interactive
-// host-key acceptance so unattended clones neither stall on a host-key prompt
-// nor offer unrelated ssh-agent identities. Returns "" when no ssh command is
-// needed (caller falls back to git's default ssh invocation).
 func buildSSHCommand(remote string, opts Options) string {
 	base := strings.TrimSpace(opts.SSHCommand)
 	if base == "" {
@@ -399,12 +375,10 @@ func buildSSHCommand(remote string, opts Options) string {
 		base, shellQuote(key))
 }
 
-// shellQuote wraps s in single quotes for safe embedding in GIT_SSH_COMMAND.
 func shellQuote(s string) string {
 	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
 }
 
-// defaultTokenUser picks a sensible HTTPS username for token-based auth.
 func defaultTokenUser(remote string) string {
 	host := ""
 	if u, err := url.Parse(remote); err == nil {
@@ -413,17 +387,14 @@ func defaultTokenUser(remote string) string {
 	if strings.Contains(host, "gitlab") {
 		return "oauth2"
 	}
-	return "x-access-token" // accepted by GitHub, Gitea, and most Git hosts
+	return "x-access-token"
 }
 
-// sanitizeURL strips embedded credentials from a URL for safe logging, graph
-// projection, and JSON verdict output.
 func sanitizeURL(raw string) string {
 	u, err := url.Parse(raw)
 	if err != nil || u.User == nil {
 		return raw
 	}
-	// Rebuild without userinfo (url.User would percent-encode the placeholder).
 	u.User = nil
 	s := u.String()
 	if i := strings.Index(s, "://"); i >= 0 {
@@ -432,7 +403,6 @@ func sanitizeURL(raw string) string {
 	return "***@" + s
 }
 
-// redactSecret removes a secret (e.g. a token echoed by git) from text.
 func redactSecret(s, secret string) string {
 	if secret == "" {
 		return s
@@ -440,10 +410,6 @@ func redactSecret(s, secret string) string {
 	return strings.ReplaceAll(s, secret, "***")
 }
 
-// writeAskPass creates a private POSIX helper script for GIT_ASKPASS so the
-// token never appears in argv, process listings, or .git/config. It reads the
-// credentials from VIGILANTE_GIT_USER / VIGILANTE_GIT_TOKEN, which are passed
-// only to the git child process.
 func writeAskPass() (string, func() error, error) {
 	dir, err := os.MkdirTemp("", "vigilante-askpass-*")
 	if err != nil {
@@ -462,8 +428,6 @@ func writeAskPass() (string, func() error, error) {
 	return script, func() error { return os.RemoveAll(dir) }, nil
 }
 
-// cloneErrorSuffix turns raw git output into an actionable hint for auth or
-// access failures on private repositories.
 func cloneErrorSuffix(out []byte, cloneURL string) string {
 	low := strings.ToLower(string(out))
 	switch {
@@ -489,7 +453,6 @@ func routeMatchesPath(pattern, reqPath string) bool {
 	if pattern == reqPath {
 		return true
 	}
-	// Strip Go 1.22 method prefix in pattern if present, e.g. "GET /api/v1/files"
 	if _, rest, ok := strings.Cut(pattern, " "); ok && strings.HasPrefix(rest, "/") {
 		pattern = strings.TrimSpace(rest)
 	}
@@ -499,7 +462,6 @@ func routeMatchesPath(pattern, reqPath string) bool {
 	if strings.HasSuffix(pattern, "/") && strings.HasPrefix(reqPath, pattern) {
 		return true
 	}
-	// Match prefix up to parameter placeholder (:id or {id})
 	if idx := strings.IndexAny(pattern, ":{*"); idx > 0 {
 		prefix := pattern[:idx]
 		if strings.HasPrefix(reqPath, prefix) {
@@ -513,11 +475,8 @@ func routeMatchesPath(pattern, reqPath string) bool {
 }
 
 var (
-	// Matches Go mux/http.HandleFunc("/path", handler) or r.Get("/path", ...)
-	reRouteCall = regexp.MustCompile(`(?i)\b(?:HandleFunc|Handle|Get|Post|Put|Delete|Patch|Route)\s*\(\s*["'\x60]((?:[A-Z]+\s+)?/[^"'\x60]*)["'\x60](?:\s*,\s*([a-zA-Z0-9_.]+))?`)
-	// Matches Python @app.route("/path") or @router.get("/path")
-	rePyRoute = regexp.MustCompile(`(?i)@(?:app|router|bp)\.(?:route|get|post|put|delete|patch)\s*\(\s*["'](/[^"']*)["']`)
-	// Matches Path comparison in custom handlers, e.g. r.URL.Path == "/api/v1/files" or strings.HasPrefix(r.URL.Path, "/api/")
+	reRouteCall  = regexp.MustCompile(`(?i)\b(?:HandleFunc|Handle|Get|Post|Put|Delete|Patch|Route)\s*\(\s*["'\x60]((?:[A-Z]+\s+)?/[^"'\x60]*)["'\x60](?:\s*,\s*([a-zA-Z0-9_.]+))?`)
+	rePyRoute    = regexp.MustCompile(`(?i)@(?:app|router|bp)\.(?:route|get|post|put|delete|patch)\s*\(\s*["'](/[^"']*)["']`)
 	rePathString = regexp.MustCompile(`["'](/[a-zA-Z0-9_./-]+)["']`)
 )
 

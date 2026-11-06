@@ -91,12 +91,6 @@ type Config struct {
 	HTTPRateRPM        int           `yaml:"http_rate_rpm" json:"http_rate_rpm"`
 	TrustProxy         string        `yaml:"trust_proxy" json:"trust_proxy"`
 
-	Repo       string `yaml:"repo" json:"repo"`
-	RepoRef    string `yaml:"repo_ref" json:"repo_ref"`
-	RepoUser   string `yaml:"repo_user" json:"repo_user"`
-	RepoToken  string `yaml:"repo_token" json:"repo_token"`
-	RepoSSHKey string `yaml:"repo_ssh_key" json:"repo_ssh_key"`
-
 	TLSCert string `yaml:"tls_cert" json:"tls_cert"`
 	TLSKey  string `yaml:"tls_key" json:"tls_key"`
 
@@ -165,6 +159,27 @@ type Config struct {
 
 	PassiveIface string `yaml:"passive_iface" json:"passive_iface"`
 	PassivePorts string `yaml:"passive_ports" json:"passive_ports"`
+
+	// Extensions stores decoded configuration contributed by registered
+	// FeatureExtensions (such as ext/codebase).
+	Extensions map[string]any `yaml:"-" json:"-"`
+}
+
+// SetExtension stores decoded extension configuration on c.
+func (c *Config) SetExtension(name string, val any) {
+	if c.Extensions == nil {
+		c.Extensions = map[string]any{}
+	}
+	c.Extensions[name] = val
+}
+
+// Extension retrieves decoded extension configuration from c.
+func (c Config) Extension(name string) (any, bool) {
+	if c.Extensions == nil {
+		return nil, false
+	}
+	v, ok := c.Extensions[name]
+	return v, ok
 }
 
 // loadConfig reads a JSON or YAML config file; an empty path returns an empty
@@ -212,6 +227,9 @@ func loadConfigs(paths []string) (Config, error) {
 			if replace {
 				dst.Field(i).Set(src.Field(i))
 			}
+		}
+		for _, ext := range activeFeatureExtensions() {
+			ext.Merge(&merged, &next, keys)
 		}
 	}
 	return merged, nil
@@ -268,15 +286,23 @@ func decodeJSON(data []byte) (Config, error) {
 	alertsRaw := raw["alerts"]
 	delete(raw, "alerts")
 
+	var c Config
+	for _, ext := range activeFeatureExtensions() {
+		if err := ext.DecodeJSON(raw, &c); err != nil {
+			return Config{}, err
+		}
+	}
+
 	rest, err := json.Marshal(raw)
 	if err != nil {
 		return Config{}, fmt.Errorf("config: invalid JSON: %w", err)
 	}
-	var c Config
-	dec := json.NewDecoder(bytes.NewReader(rest))
-	dec.DisallowUnknownFields()
-	if err := dec.Decode(&c); err != nil {
-		return Config{}, fmt.Errorf("config: invalid JSON: %w", err)
+	if len(raw) > 0 {
+		dec := json.NewDecoder(bytes.NewReader(rest))
+		dec.DisallowUnknownFields()
+		if err := dec.Decode(&c); err != nil {
+			return Config{}, fmt.Errorf("config: invalid JSON: %w", err)
+		}
 	}
 	_, c.SidecarCacheTTLSet = raw["sidecar_cache_ttl"]
 	_, c.EvalMinRecallSet = raw["eval_min_recall"]
@@ -448,8 +474,18 @@ func decodeYAML(data []byte) (Config, error) {
 			byKey[key] = i
 		}
 	}
-	keys := make([]string, 0, len(byKey))
+	exts := activeFeatureExtensions()
+	keySet := map[string]bool{}
 	for k := range byKey {
+		keySet[k] = true
+	}
+	for _, ext := range exts {
+		for _, k := range ext.KnownKeys() {
+			keySet[k] = true
+		}
+	}
+	keys := make([]string, 0, len(keySet))
+	for k := range keySet {
 		keys = append(keys, k)
 	}
 	sort.Strings(keys)
@@ -477,6 +513,28 @@ func decodeYAML(data []byte) (Config, error) {
 		if i := indexComment(val); i >= 0 {
 			val = strings.TrimSpace(val[:i])
 			val = strings.Trim(val, `"'`)
+		}
+
+		extHandled := false
+		for _, ext := range exts {
+			handled, err := ext.DecodeYAML(key, val, func() (string, error) {
+				block, next, berr := captureBlock(lines, i+1)
+				if berr != nil {
+					return "", berr
+				}
+				i = next - 1
+				return block, nil
+			}, &c)
+			if err != nil {
+				return Config{}, err
+			}
+			if handled {
+				extHandled = true
+				break
+			}
+		}
+		if extHandled {
+			continue
 		}
 
 		if (key == "agent_args" || key == "decoder_args" || key == "action_plugins") && val == "" {

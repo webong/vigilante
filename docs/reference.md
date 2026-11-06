@@ -2,9 +2,20 @@
 
 [Back to the usage guide](../README.md)
 
-## Pointing at your codebase
+## Pointing at your codebase (`ext/codebase`)
 
-`-repo` accepts **any Git repository** — GitHub, GitLab, Bitbucket, Gitea, self-hosted — as a full URL (`https://`, `ssh://`, `git://`, `file://`, scp-like `git@host:path`), a `host/owner/repo` or `owner/repo` shorthand, or a local directory.
+Codebase mapping is a detachable `ext.plugin/v1` extension (`vigilante.codebase@v1` in [`ext/codebase`](../ext/codebase)). It is off by default; when attached to the binary, the extension registers its own CLI flags (`-codebase`, `-codebase-plugin`, `-repo`, `-repo-ref`, `-repo-user`, `-repo-token`, `-repo-ssh-key`) and YAML/JSON config keys (`codebase`, `codebase_plugin`, `repo`, `repo_ref`, `repo_user`, `repo_token`, `repo_ssh_key`). Build with `-tags nocodebase` to detach it from the binary completely.
+
+`-repo` (or `codebase.repo`) accepts **any Git repository** — GitHub, GitLab, Bitbucket, Gitea, self-hosted — as a full URL (`https://`, `ssh://`, `git://`, `file://`, scp-like `git@host:path`), a `host/owner/repo` or `owner/repo` shorthand, or a local directory.
+
+```yaml
+# Structured codebase extension block in vigilante.yaml
+codebase:
+  enabled: true
+  repo: auto                  # or owner/repo, URL, or local directory
+  ref: release-1.2
+  # plugin: /opt/vigilante/codebase-worker
+```
 
 ```sh
 # public, any host
@@ -21,7 +32,7 @@ VIGILANTE_GIT_TOKEN=ghp_xxx go run ./cmd/vigilante -mode demo -repo https://gith
 -repo-ref release-1.2 -repo-user oauth2   # VIGILANTE_GIT_HOST, VIGILANTE_GIT_USER
 ```
 
-`-repo auto` discovers the source root automatically from the port → listening PID → executable. Env fallbacks: `VIGILANTE_GIT_HOST`, `VIGILANTE_GIT_USER`, `VIGILANTE_GIT_TOKEN`, `VIGILANTE_GIT_SSH_KEY`.
+`-repo auto` (or `-codebase` with no explicit `-repo`) discovers the source root automatically from the port → listening PID → executable. Env fallbacks: `VIGILANTE_GIT_HOST`, `VIGILANTE_GIT_USER`, `VIGILANTE_GIT_TOKEN`, `VIGILANTE_GIT_SSH_KEY`.
 
 Automatic discovery needs a locally resolvable target/listening process; provide
 an explicit source directory when observing a whole interface or remote hosts.

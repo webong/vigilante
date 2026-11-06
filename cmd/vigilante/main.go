@@ -52,7 +52,6 @@ import (
 	"github.com/webong/vigilante/internal/gateway"
 	"github.com/webong/vigilante/internal/history"
 	"github.com/webong/vigilante/internal/policy"
-	"github.com/webong/vigilante/internal/repo"
 	httpResponse "github.com/webong/vigilante/internal/response"
 	"github.com/webong/vigilante/internal/schema"
 	"github.com/webong/vigilante/internal/status"
@@ -127,11 +126,6 @@ func run(args []string, out io.Writer) error {
 	alertMaxBytes := fs.Int64("alert-max-bytes", 10<<20, "Rotate the alert file after this many bytes")
 	alertKeep := fs.Int("alert-keep", 3, "Number of rotated alert files to retain")
 	sampleRate := fs.Float64("sample-rate", 1.0, "Fraction [0,1] of mirrored flows dispatched to the agent (<=0 or 1 = all); sampling never affects primary traffic")
-	repoTarget := fs.String("repo", ".", "Git repo target to index for codebase awareness: any host URL (https/ssh/git/file://, scp-like git@host:path), owner/repo or host/owner/repo shorthand, a local path, or \"auto\" to discover the target service's source root from -target")
-	repoRef := fs.String("repo-ref", "", "Branch or tag to shallow-clone for -repo (empty = remote default branch)")
-	repoUser := fs.String("repo-user", "", "HTTPS username for private -repo clones (default: x-access-token, or VIGILANTE_GIT_USER)")
-	repoToken := fs.String("repo-token", "", "HTTPS auth token for private -repo clones (prefer the VIGILANTE_GIT_TOKEN env var to keep it out of argv)")
-	repoSSHKey := fs.String("repo-ssh-key", "", "Path to an SSH private key for private ssh:// or git@ clones of -repo (default: VIGILANTE_GIT_SSH_KEY env var / ssh-agent)")
 	graphFile := fs.String("graph-file", "", "Optional path to persist the ext + vigilante graph JSON store")
 	queueSize := fs.Int("queue-size", 256, "Bounded packet mirror ring-buffer capacity")
 	supervisedAgent := fs.Bool("supervised-agent", false, "Launch agent out-of-process via ext/res/system/supervisor + jsonline IPC (equivalent to -agent supervised)")
@@ -168,6 +162,12 @@ func run(args []string, out io.Writer) error {
 	trustProxy := fs.String("trust-proxy", "", "Comma-separated proxy CIDRs trusted to supply X-Forwarded-For")
 	fs.Var(&configPaths, "config", "Config file (YAML or JSON); repeat in order, later files override earlier files; CLI flags win")
 
+	extList := activeFeatureExtensions()
+	extBindings := make([]FlagBinding, len(extList))
+	for i, ext := range extList {
+		extBindings[i] = ext.BindFlags(fs)
+	}
+
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -180,6 +180,11 @@ func run(args []string, out io.Writer) error {
 	}
 	set := map[string]bool{}
 	fs.Visit(func(f *flag.Flag) { set[f.Name] = true })
+	for _, b := range extBindings {
+		if b != nil {
+			b.Apply(set, &cfg)
+		}
+	}
 
 	applyStr := func(flagSet bool, dst *string, val string) {
 		if !flagSet && val != "" {
@@ -236,11 +241,6 @@ func run(args []string, out io.Writer) error {
 		*sidecarCacheTTL = cfg.SidecarCacheTTL
 	}
 	applyStr(set["target"], targetAddr, cfg.Target)
-	applyStr(set["repo"], repoTarget, cfg.Repo)
-	applyStr(set["repo-ref"], repoRef, cfg.RepoRef)
-	applyStr(set["repo-user"], repoUser, cfg.RepoUser)
-	applyStr(set["repo-token"], repoToken, cfg.RepoToken)
-	applyStr(set["repo-ssh-key"], repoSSHKey, cfg.RepoSSHKey)
 	applyStr(set["tls-cert"], tlsCert, cfg.TLSCert)
 	applyStr(set["tls-key"], tlsKey, cfg.TLSKey)
 	applyStr(set["planner-url"], plannerURL, cfg.PlannerURL)
@@ -423,52 +423,14 @@ func run(args []string, out io.Writer) error {
 		return fmt.Errorf("init ext.system graph: %w", err)
 	}
 
-	// Auto-discovery: when -repo is "auto" (or empty), infer the target's
-	// source root from -target (port -> listening PID -> open cwd / checkout).
-	// Central server mode does not capture local traffic, so skip repo indexing
-	// unless explicitly requested.
-	if *mode == "server" && !set["repo"] && cfg.Repo == "" {
-		*repoTarget = ""
+	// Codebase mapping is a detachable ext feature (ext/codebase,
+	// vigilante.codebase@v1). When detached or unconfigured, repoIdx is nil.
+	repoIdx, repoClose, err := openCodebase(ctx, out, &cfg, *mode, *targetAddr, store)
+	if err != nil {
+		return err
 	}
-	target := strings.TrimSpace(*targetAddr)
-	if *mode != "server" {
-		if t := strings.ToLower(strings.TrimSpace(*repoTarget)); t == "auto" || t == "" {
-			if root := repo.DiscoverRoot(ctx, target); root != "" {
-				fmt.Fprintf(out, "[vigilante] discovered codebase root %s for target %s\n", root, target)
-				*repoTarget = root
-			} else {
-				fmt.Fprintf(out, "[vigilante] auto repo discovery found no source root for %s; codebase context disabled\n", orDash(target))
-				*repoTarget = ""
-			}
-		}
-	}
-
-	var repoIdx *repo.Index
-	if *repoTarget != "" {
-		repoOpts := repo.Options{
-			Ref:    *repoRef,
-			User:   firstNonEmpty(*repoUser, os.Getenv("VIGILANTE_GIT_USER")),
-			Token:  firstNonEmpty(*repoToken, os.Getenv("VIGILANTE_GIT_TOKEN")),
-			SSHKey: firstNonEmpty(*repoSSHKey, os.Getenv("VIGILANTE_GIT_SSH_KEY")),
-		}
-		fmt.Fprintf(out, "[vigilante] indexing codebase repository %q...", *repoTarget)
-		sshTarget := strings.HasPrefix(*repoTarget, "git@") || strings.HasPrefix(*repoTarget, "ssh://")
-		switch {
-		case repoOpts.Token != "" && !sshTarget:
-			fmt.Fprintln(out, " (auth: HTTPS token via GIT_ASKPASS helper)")
-		case repoOpts.SSHKey != "" && sshTarget:
-			fmt.Fprintf(out, " (auth: ssh key %s)\n", repoOpts.SSHKey)
-		default:
-			fmt.Fprintln(out, " (auth: configured git credential helpers / ssh-agent)")
-		}
-		repoIdx, err = repo.OpenWithOptions(ctx, *repoTarget, repoOpts)
-		if err != nil {
-			return fmt.Errorf("index repo %q: %w", *repoTarget, err)
-		}
-		defer repoIdx.Close()
-		snap := repoIdx.Snapshot()
-		fmt.Fprintf(out, "[vigilante] codebase indexed: %d files, %d routes, %d sinks (commit %s, tree %s...)\n",
-			snap.FileCount, len(snap.Routes), len(snap.Sinks), snap.Commit, shortHash(snap.TreeDigest))
+	if repoClose != nil {
+		defer func() { _ = repoClose(context.Background()) }()
 	}
 
 	// The enforcement snapshot the request path reads. Stateful consumers

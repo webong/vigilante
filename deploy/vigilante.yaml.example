@@ -34,11 +34,15 @@ target: "http://127.0.0.1:3000"
 # sidecar_allow_remote: false
 # sidecar_cache_ttl: 1s            # 0 disables; header-based rules are never cached
 
-# Codebase index: any host URL, owner/repo shorthand, local path, or "auto"
-repo: auto
-# repo_ref: main
-# repo_token: ghp_xxx            # prefer the VIGILANTE_GIT_TOKEN env var
-# repo_ssh_key: /etc/vigilante/id_ed25519
+# Codebase mapping ext (vigilante.codebase@v1; off by default):
+# Any host URL, owner/repo shorthand, local path, or "auto".
+# Either use the structured `codebase:` block or flat `repo*` keys:
+# codebase:
+#   repo: auto
+#   ref: main
+#   token: ghp_xxx          # prefer the VIGILANTE_GIT_TOKEN env var
+#   ssh_key: /etc/vigilante/id_ed25519
+#   plugin: /opt/vigilante/codebase-worker
 
 # TLS on the public listener
 # tls_cert: /etc/vigilante/fullchain.pem

@@ -2,17 +2,74 @@ package main
 
 import (
 	"context"
+	"encoding/json"
+	"flag"
 	"net"
 	"net/http"
 	"net/netip"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/webong/vigilante/internal/history"
 	"github.com/webong/vigilante/internal/identity"
 	httpResponse "github.com/webong/vigilante/internal/response"
 )
+
+// FeatureExtension is a detachable ext feature that brings its own CLI flags,
+// YAML/JSON configuration keys and structured blocks, multi-file merge rules,
+// and runtime wiring to Vigilante when registered.
+type FeatureExtension interface {
+	Name() string
+	KnownKeys() []string
+	BindFlags(fs *flag.FlagSet) FlagBinding
+	DecodeJSON(raw map[string]json.RawMessage, cfg *Config) error
+	DecodeYAML(key, val string, captureBlock func() (string, error), cfg *Config) (bool, error)
+	Merge(dst, src *Config, keys map[string]bool)
+}
+
+// FlagBinding applies explicitly set CLI flags over config-file values for one
+// registered FeatureExtension.
+type FlagBinding interface {
+	Apply(set map[string]bool, cfg *Config)
+}
+
+var (
+	featureExtMu sync.RWMutex
+	featureExts  []FeatureExtension
+)
+
+func registerFeatureExtension(ext FeatureExtension) {
+	featureExtMu.Lock()
+	defer featureExtMu.Unlock()
+	for i, existing := range featureExts {
+		if existing.Name() == ext.Name() {
+			featureExts[i] = ext
+			return
+		}
+	}
+	featureExts = append(featureExts, ext)
+}
+
+func activeFeatureExtensions() []FeatureExtension {
+	featureExtMu.RLock()
+	defer featureExtMu.RUnlock()
+	out := make([]FeatureExtension, len(featureExts))
+	copy(out, featureExts)
+	return out
+}
+
+func hasFeatureExtension(name string) bool {
+	featureExtMu.RLock()
+	defer featureExtMu.RUnlock()
+	for _, ext := range featureExts {
+		if ext.Name() == name {
+			return true
+		}
+	}
+	return false
+}
 
 type runtimeKey struct{}
 
