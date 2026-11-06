@@ -194,4 +194,4 @@ and run on whichever side owns their concern.
 | Server routes | `internal/fleet`, `cmd/vigilante` |
 | Sensor registry | `internal/history` |
 | Strictest-of-two gate | `internal/gate` |
-| Dashboard sensors API | `ext/obs/dashboard.go` |
+| Dashboard sensors API | `ext/obs/extension.go` (`Extension.ServeHTTP`) |
